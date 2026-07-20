@@ -11,6 +11,9 @@ mono_crash.*.json
 .idea/
 .vscode/
 
+# Personal working notes, never meant for the public repo
+/.local-notes.md
+
 # The user's own extracted Demon's Souls copy, populated by the in-editor/CLI mount
 # action - never bundle proprietary game assets. See CLAUDE.md's "Asset mounting".
 /mounted

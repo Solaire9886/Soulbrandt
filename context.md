@@ -41,6 +41,22 @@ re-litigated. Read both — CLAUDE.md for the current state of truth, this for t
    reads `.bnd`/`.dcx` containers directly via `SoulsFormatsNEXT`'s own `DCX`/`BND3`/
    `BND4`, no external tool. See the "Asset mounting system built" entry below for the
    investigation and the real bugs it surfaced in cross-category texture resolution.
+9. Cleaned up remaining leftovers and put the project under real version control:
+   deleted `WitchyBND-3.0.1.0-linux-x64/` (dead weight, fully superseded by item 8) and
+   `desflver_test/` (the original proof-of-concept console app from item 1 - everything
+   it covered now lives in the native importer). Finished the `Boletaria` → `Soulbrandt`
+   rename that item 7 only did at the project-organization level: the csproj file itself
+   and `project.godot`'s `[dotnet] project/assembly_name` were still `Boletaria` until
+   now. `git init`'d the project for the first time, forked `SoulsFormatsNEXT` to
+   `github.com/Solaire9886/SoulsFormatsNEXT` and committed its two local patches there
+   for real (they'd been sitting as uncommitted working-tree edits in a plain clone this
+   whole time - a live risk, not just a tidiness concern, since any `git pull`/`checkout`
+   in that directory would have silently wiped them with no recovery path), then pulled
+   it back into this project as a proper git submodule pinned to that patched commit.
+   Pushed the whole thing to `github.com/Solaire9886/Soulbrandt` - GPLv3 (required by
+   `SoulsFormatsNEXT`'s own GPLv3 license with no linking exception, not an arbitrary
+   choice), with an RPCS3-style disclaimer in `README.md` and a `CONTRIBUTING.md` for
+   future contributors - and made the repo public.
 
 ## Real bugs found and fixed (root causes, not symptoms)
 
