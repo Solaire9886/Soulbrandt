@@ -1,0 +1,23 @@
+[gd_scene format=3 uid="uid://ciahytwhob3rq"]
+
+[ext_resource type="Texture2D" uid="uid://dw2ks5wt2w38r" path="res://addons/archstone/button.png" id="1_qjsrx"]
+
+[node name="Import" type="Control" unique_id=1972480970]
+layout_mode = 3
+anchors_preset = 0
+
+[node name="MenuButton" type="MenuButton" parent="." unique_id=45880486]
+layout_mode = 0
+offset_left = -500.0
+offset_right = -366.0
+offset_bottom = 40.0
+theme_override_constants/h_separation = 4
+theme_override_constants/icon_max_width = 32
+text = "Archstone
+"
+icon = ExtResource("1_qjsrx")
+item_count = 2
+popup/item_0/text = "Import"
+popup/item_0/id = 0
+popup/item_1/text = "Mount..."
+popup/item_1/id = 1

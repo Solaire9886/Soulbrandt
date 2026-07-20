@@ -1,0 +1,3 @@
+[submodule "SoulsFormatsNEXT"]
+	path = SoulsFormatsNEXT
+	url = git@github.com:Solaire9886/SoulsFormatsNEXT.git

@@ -1,0 +1,16 @@
+# Godot 4+ specific ignores
+.godot/
+/android/
+export_presets.cfg
+mono_crash.*.json
+
+# C#/.NET
+*.csproj.user
+
+# IDE
+.idea/
+.vscode/
+
+# The user's own extracted Demon's Souls copy, populated by the in-editor/CLI mount
+# action - never bundle proprietary game assets. See CLAUDE.md's "Asset mounting".
+/mounted
