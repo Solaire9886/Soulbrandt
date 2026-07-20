@@ -22,11 +22,7 @@ headed.
 
 ## Build & verify
 
-**This machine needs a merged .NET root before touching any of this:** the system only ships .NET 9/10 runtimes, but Godot's own C# tooling (`GodotTools`, used by the editor's build/import machinery) hardcodes a `net8.0` requirement with no cross-major rollForward. A net8 runtime is installed at `~/.dotnet-godot` with the system SDK/other runtimes symlinked in alongside it so both resolve from one root. Every `godot-mono` invocation needs:
-```
-DOTNET_ROOT="$HOME/.dotnet-godot" PATH="$HOME/.dotnet-godot:$PATH" godot-mono ...
-```
-Without this, headless Godot commands touching C# either hang indefinitely or fail with a cryptic ".NET Sdk not found" error.
+Godot's own C# tooling (`GodotTools`, used by the editor's build/import machinery) hardcodes a `net8.0` requirement with no cross-major rollForward. On Arch, `pacman -S dotnet-sdk-8.0` (from `extra`) satisfies this alongside whatever newer SDK you already have installed, with no manual `DOTNET_ROOT` override needed — plain `dotnet`/`godot-mono` on `PATH` resolves it. On other distros, install whatever your package manager calls the .NET 8 SDK the same way. (An earlier revision of this doc had you build a manual merged root at `~/.dotnet-godot`, under the mistaken assumption that Arch didn't package a net8 SDK at all; confirmed obsolete and dropped — see `context.md`'s "Environment specifics" section for the full history.)
 
 **Build the C# assembly** (do this after any change under `addons/archstone/`):
 ```
@@ -38,13 +34,13 @@ Do **not** use `godot-mono --headless --build-solutions` to build — it reliabl
 ```
 rm -f .godot/imported/*.flver-*
 find mounted -iname "*.flver" -o -iname "*.tpf" | xargs touch   # only if testing map/chr assets
-DOTNET_ROOT="$HOME/.dotnet-godot" PATH="$HOME/.dotnet-godot:$PATH" godot-mono --headless --editor --path . --import
+godot-mono --headless --editor --path . --import
 ```
 A full reimport of all ~3400 mounted FLVER files (now spanning `chr`/`map`/`obj`/`parts`, not just `chr`/`map` as before the "Asset mounting" system existed) is expected to end with a small number of errors, all the same known bug: a FLVER0 vertex/UV layout the importer doesn't handle yet (`ArgumentOutOfRangeException` on `v.UVs[0]`/`v.Normals[0]`, `FlverSceneImporter.cs:107`). Confirmed affected files as of this writing: `m9999b0.flver`/`m9900.flver` across several map areas, plus `o9996.flver` under `obj/` — the first `obj` file ever importable, since `obj` had no loose files at all before the mount system landed. Expect this affected-file set to grow slightly as more of the game becomes newly extractable; the important check is that it's always *this same* exception at *this same* line, not a new failure mode. A genuinely different error (different exception type, different stack, or a huge jump in count) is a regression worth investigating.
 
 **There is no unit test suite.** Verification is done with throwaway `SceneTree`-extending GDScript scripts run headlessly, e.g.:
 ```
-DOTNET_ROOT="$HOME/.dotnet-godot" PATH="$HOME/.dotnet-godot:$PATH" godot-mono --headless --path . -s check.gd
+godot-mono --headless --path . -s check.gd
 ```
 where `check.gd` does `load("res://mounted/chr/c9999/c9999.flver").instantiate()` and inspects the resulting node tree (surface count, `surface_get_material(i).albedo_texture`, etc.). Write these to a scratch location and delete them when done — none should be committed.
 

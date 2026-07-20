@@ -720,6 +720,17 @@ cause was confirmed — noted so the same wrong turn isn't re-taken.
   `DOTNET_ROOT` at an isolated net8-only install instead hides the system SDK entirely
   and produces a *different* failure ("`.NET Sdk not found`") — don't do that, merge via
   symlinks into one root instead.
+- **Superseded 2026-07-20:** the "Arch dropped the package" premise above was wrong —
+  `dotnet-sdk-8.0` is in Arch's official `extra` repo and installs cleanly
+  (`pacman -S dotnet-sdk-8.0`), landing in `/usr/share/dotnet` alongside the 9.0/10.0
+  SDKs Arch's plain `dotnet-sdk` package pulls in, no merging needed. Confirmed by
+  installing it and running both `dotnet build Soulbrandt.csproj` and
+  `godot-mono --headless --editor --path . --import` with `DOTNET_ROOT` unset and `PATH`
+  restricted to system dirs only — build succeeded, import ran through the full
+  `update_scripts_classes`/editor-layout sequence with none of the old failure modes
+  (no hang, no ".NET Sdk not found"). `~/.dotnet-godot` and every `DOTNET_ROOT=` prefix
+  are removed from CLAUDE.md/CONTRIBUTING.md as of this note; if this regresses on a
+  future Arch update, the merged-root workaround above is the fallback to rebuild.
 - `godot-mono --headless --build-solutions` hangs indefinitely in this environment even
   with the runtime fixed, for reasons never fully root-caused beyond "something in
   Godot's own in-process MSBuild invocation." Given up on making it work; `Boletaria.csproj`
