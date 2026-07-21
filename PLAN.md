@@ -9,7 +9,7 @@ file covers where it's going.
 Soulbrandt is ultimately a **full recreation of Demon's Souls (2009, PS3) on a modern
 engine (Godot)**, in the same spirit as Dusklight (Twilight Princess) or Daggerfall
 Unity: the project itself will **never contain any proprietary FromSoftware code or
-assets**. Everything playable comes from the user's own legally-owned extracted copy of
+assets**. Everything playable comes from the user's own legally-owned copy of
 the game, read at runtime. This isn't a launch-time legal footnote — it's a constraint
 that should shape design decisions throughout both phases below. If a feature only works
 by bundling or redistributing original assets/data, it's the wrong design.
@@ -30,7 +30,7 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
   category's texture set wholesale — see CLAUDE.md's "Texture resolution" section).
 - Alpha/cutout and alpha-blend material wiring (foliage, hair).
 - **The in-editor asset-mounting system** (the editor-side half of item 1 below): a
-  "Mount..." action reads the user's raw extracted game copy directly — `.bnd`/`.dcx`
+  "Mount..." action reads the user's raw game copy directly — `.bnd`/`.dcx`
   containers and all — via `SoulsFormatsNEXT`'s own `DCX`/`BND3`/`BND4` readers, no
   external tool (WitchyBND is no longer needed for the standard workflow). Also runnable
   headlessly (`extract_cli.gd`), with per-category selection. `mounted` is a real,
@@ -97,6 +97,25 @@ data, etc.). None of this has been designed yet beyond the mission statement abo
 this section exists so future sessions know this phase is coming and why the mounting
 system in Phase 1 has to be built for it, not just for editor convenience. Expect this
 section to grow into real sub-plans once Phase 1 is far enough along to start it.
+
+A preliminary (curiosity-driven, not yet acted on) investigation already found where
+most of this phase's *data* actually lives, and confirmed none of it needs any DRM
+circumvention — see context.md's "Non-visual game-logic data investigation" entry for
+the full picture. Headline findings worth remembering when this phase actually starts:
+stamina/combat/AI-behavior numbers are fully exposed via PARAM (with paramdefs shipped
+in the game itself, unlike later titles that need the community `Paramdex` project), map
+event scripting and full per-enemy AI logic are plain, unencrypted Lua source under
+`script/` (same `.bnd`/`.dcx` reading `AssetExtractor.cs` already does, just not yet
+extended to that category), and per-animation timed-event data (hit windows, the kind of
+thing that would encode dodge-roll invincibility frames) lives in real, already-readable
+`.tae` files bundled in each character's `.anibnd` — `SoulsFormatsNEXT`'s `TAE` reader
+already has an explicit `TAEFormat.DES` case and parses these directly. The two real
+gaps: TAE event *type IDs* have no friendly names without a template (same
+template-needed relationship PARAMDEF has to PARAM — none sourced or built for DeS yet),
+and precise i-frame/hyper-armor frame counts don't appear to be documented anywhere
+publicly for this specific title (unlike Dark Souls 3, which the community has mapped
+in detail) — filling that second gap will likely mean direct frame-by-frame observation
+against the real game in RPCS3, not extraction.
 
 ## Standing constraint (applies to both phases, always)
 

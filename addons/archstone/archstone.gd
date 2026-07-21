@@ -7,10 +7,13 @@ var import_button
 var flver_importer
 
 var _mount_dialog: EditorFileDialog
+var _import_scope_dialog: ConfirmationDialog
 var _category_dialog: ConfirmationDialog
+var _clear_confirm_dialog: ConfirmationDialog
 var _progress_dialog: AcceptDialog
 var _progress_bar: ProgressBar
 var _progress_label: Label
+var _message_dialog: AcceptDialog
 
 
 func _enable_plugin() -> void:
@@ -40,14 +43,18 @@ func _exit_tree() -> void:
 	remove_control_from_container(EditorPlugin.CONTAINER_TOOLBAR, import_button)
 
 	import_button.free()
-	for dialog in [_mount_dialog, _category_dialog, _progress_dialog]:
+	for dialog in [_mount_dialog, _import_scope_dialog, _category_dialog, _clear_confirm_dialog, _progress_dialog, _message_dialog]:
 		if dialog:
 			dialog.queue_free()
 
 
 func _on_menu_item_pressed(id: int) -> void:
-	if id == 1:
+	if id == 0:
+		_on_import_pressed()
+	elif id == 1:
 		_show_mount_dialog()
+	elif id == 2:
+		_show_clear_confirm_dialog()
 
 
 func _show_mount_dialog() -> void:
@@ -66,8 +73,54 @@ func _show_mount_dialog() -> void:
 
 
 func _on_raw_root_selected(dir: String) -> void:
+	var extractor = load("res://addons/archstone/AssetExtractor.cs").new()
+	var found: Array = []
+	for category in extractor.GetKnownCategories():
+		if DirAccess.dir_exists_absolute(dir.path_join(category)):
+			found.append(category)
+
+	if found.is_empty():
+		_show_message("Not a valid Demon's Souls root", "None of the known asset folders (%s) were found directly under:\n%s" % [", ".join(extractor.GetKnownCategories()), dir])
+		return
+
 	_save_mount_root(dir)
-	_show_category_dialog(dir)
+	_show_message("Game root mounted", "Found: %s\n%s\n\nUse \"Import\" to extract assets." % [", ".join(found), dir])
+
+
+func _show_message(title: String, text: String) -> void:
+	_message_dialog = AcceptDialog.new()
+	_message_dialog.title = title
+	_message_dialog.dialog_text = text
+	EditorInterface.get_base_control().add_child(_message_dialog)
+	_message_dialog.popup_centered()
+	_message_dialog.confirmed.connect(_message_dialog.queue_free)
+	_message_dialog.close_requested.connect(_message_dialog.queue_free)
+
+
+func _on_import_pressed() -> void:
+	var root := _load_mount_root()
+	if root.is_empty():
+		_show_message("No game mounted yet", "Use \"Mount...\" first to select your Demon's Souls extraction root.")
+		return
+	_show_import_scope_dialog(root)
+
+
+func _show_import_scope_dialog(raw_root: String) -> void:
+	_import_scope_dialog = ConfirmationDialog.new()
+	_import_scope_dialog.title = "Import Demon's Souls assets"
+	_import_scope_dialog.dialog_text = "Import every known asset category, or choose which ones?"
+	_import_scope_dialog.ok_button_text = "Full Import"
+	_import_scope_dialog.add_button("Choose Categories...", true, "choose")
+
+	_import_scope_dialog.confirmed.connect(func(): _run_extraction(raw_root, []))
+	_import_scope_dialog.custom_action.connect(func(action):
+		if action == "choose":
+			_import_scope_dialog.hide()
+			_show_category_dialog(raw_root)
+	)
+
+	EditorInterface.get_base_control().add_child(_import_scope_dialog)
+	_import_scope_dialog.popup_centered()
 
 
 func _show_category_dialog(raw_root: String) -> void:
@@ -137,6 +190,40 @@ func _on_extract_complete(extracted: int, skipped: int, errors: String) -> void:
 			if not line.is_empty():
 				push_error("Archstone mount: " + line)
 	EditorInterface.get_resource_filesystem().scan()
+
+
+func _show_clear_confirm_dialog() -> void:
+	_clear_confirm_dialog = ConfirmationDialog.new()
+	_clear_confirm_dialog.title = "Clear mounted assets"
+	_clear_confirm_dialog.dialog_text = "This will delete res://mounted and everything in it. You can re-mount and re-import afterwards. Continue?"
+	_clear_confirm_dialog.confirmed.connect(_clear_mounted_assets)
+	EditorInterface.get_base_control().add_child(_clear_confirm_dialog)
+	_clear_confirm_dialog.popup_centered()
+
+
+func _clear_mounted_assets() -> void:
+	if DirAccess.dir_exists_absolute("res://mounted"):
+		_delete_recursive("res://mounted")
+	EditorInterface.get_resource_filesystem().scan()
+	_show_message("Mounted assets cleared", "res://mounted has been deleted.")
+
+
+func _delete_recursive(path: String) -> void:
+	var dir := DirAccess.open(path)
+	if not dir:
+		return
+	dir.list_dir_begin()
+	var entry := dir.get_next()
+	while entry != "":
+		if entry != "." and entry != "..":
+			var entry_path := path.path_join(entry)
+			if dir.current_is_dir():
+				_delete_recursive(entry_path)
+			else:
+				dir.remove(entry_path)
+		entry = dir.get_next()
+	dir.list_dir_end()
+	DirAccess.remove_absolute(path)
 
 
 func _load_mount_root() -> String:

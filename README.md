@@ -7,7 +7,7 @@ goal: a full Demon's Souls recreation in Godot that bundles no proprietary game 
 relying entirely on each user's own legally-owned copy of the game.
 
 **No game assets are included in this repo, and none ever will be.** Everything here is
-original code that reads a format; you provide your own extracted copy of the game.
+original code that reads a format; you provide your own copy of the game.
 
 ## Disclaimer
 
@@ -18,12 +18,10 @@ original code that reads a format; you provide your own extracted copy of the ga
   will.
 - This project does not implement, provide, or document any method of bypassing disc
   encryption or other copy protection. It only reads container/asset formats
-  (BND/DCX/FLVER/TPF) from files you already have — how you obtain a decrypted, legally
-  extracted copy of your own game is entirely your own responsibility and outside this
-  project's scope.
-- Using this software requires you to own a legitimate copy of Demon's Souls and to
-  extract your own game files yourself. No extraction guides, decryption keys, or
-  pre-extracted files are provided here.
+  (BND/DCX/FLVER/TPF) from files you already have — how you obtain an authentic, legal
+  copy of your own game is entirely your own responsibility and outside this project's scope.
+- Using this software requires you to own a legitimate dumped copy of Demon's Souls.
+  No extraction guides, decryption keys, or pre-extracted files are provided here.
 - This is an independent reverse-engineering effort undertaken for interoperability and
   preservation purposes, provided with no warranty of any kind.
 
@@ -37,7 +35,7 @@ original code that reads a format; you provide your own extracted copy of the ga
   convention
 - Custom shaders for terrain ground-blending and water (reflection/refraction/depth-fade)
 - An in-editor and headless **asset mounting** system: point it at your own raw PS3
-  extraction and it unpacks the game's BND/DCX containers directly, in-process — no
+  game directory and it unpacks the game's BND/DCX containers directly, in-process — no
   external unpacking tool needed
 
 See `CLAUDE.md` for the full architecture writeup, `PLAN.md` for the roadmap, and
@@ -48,7 +46,7 @@ See `CLAUDE.md` for the full architecture writeup, `PLAN.md` for the roadmap, an
 - Godot 4.7 (.NET/Mono build)
 - .NET SDK 8.0 (Godot's C# tooling requires it specifically — see `CLAUDE.md` if you're
   on a machine that only ships newer .NET runtimes)
-- Your own legal copy of Demon's Souls (PS3), extracted to a raw, unmodified disc image
+- Your own legal copy of Demon's Souls (PS3), dumped and unmodified
 
 ## Getting started
 
@@ -63,7 +61,7 @@ See `CLAUDE.md` for the full architecture writeup, `PLAN.md` for the roadmap, an
    dotnet build Soulbrandt.csproj
    ```
 3. Open the project in Godot, use the **Mount...** action in the editor toolbar to point
-   it at your own raw game extraction, then import.
+   it at your own raw game directory, then import.
 
 ## License
 

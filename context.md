@@ -173,321 +173,100 @@ cause was confirmed — noted so the same wrong turn isn't re-taken.
   all ~1776 FLVER files still produces exactly the same 16 known errors (no regression),
   and the user visually confirmed both the Shrine of Storms layout and c9990's
   shield/sword hands are now correct.
-- **Missing terrain ground-blend layer (hard seams between grass/dirt/stone).** User
-  noticed `m0002b1.flver` (Shrine of Storms island/stairs) had hard mesh-boundary seams
-  between ground textures where the real game blends them smoothly. Root cause: a large
-  family of FromSoft map materials carry a *second* texture set (`g_Diffuse_2` plus
-  optionally `g_Specular_2`/`g_Bumpmap_2`) meant to be blended with the first via FLVER's
-  `VertexColor` layout semantic (SoulsFormats' own doc comment: "data used for blending,
-  alpha, etc.") — confirmed non-constant (varies 0.0-1.0, R=G=B) rather than dead data.
-  The importer only ever read the first set, so every such mesh rendered as one flat
-  texture. Fixed by branching `GetOrBuildMaterial` to build a `ShaderMaterial`
-  (`addons/archstone/terrain_blend.gdshader`) instead of `StandardMaterial3D` when a
-  material qualifies, mixing both layers by the FLVER vertex-color red channel.
-  - **First attempt was wrong, corrected same session.** Initially gated on all three of
-    `g_Diffuse_2`+`g_Specular_2`+`g_Bumpmap_2` being present together, based on sampling
-    only `m0002b1.flver` where that held for every blend material found. User then tested
-    Boletarian Palace (`m02_00_00_00`, pieces `m0100b0`-`m0500b0`) via screenshots
-    comparing an emulator run against the Godot editor, and found ground patches
-    rendering as flat dark rock instead of blending with grass, with hard edges — e.g.
-    `m0100b0.flver` material 2 ("緑"/"green") and material 3 ("緑ディテール"/"green
-    detail") both have `g_Diffuse_2`+`g_Bumpmap_2` (real grass/cliff texture pairs) but
-    *no* specular anywhere, so the `g_Specular_2`-required gate wrongly excluded them,
-    falling back to whichever texture happened to be the primary `g_Diffuse` (rock, on
-    the "detail" variant) with the actual grass layer silently ignored in `g_Diffuse_2`.
-  - **Corrected gate, confirmed across the whole dataset.** Full-dataset scan of all 963
-    `g_Diffuse_2` materials in the game found the real discriminator is FromSoft's own MTD
-    bracket tag: 912 have `[M]` or `[ML]` in the MTD filename (the blend-shader family
-    marker) with bumpmap and specular each independently optional per layer (174 have
-    neither, 110 have bumpmap only, 56 have specular only, 566 have both — the pattern the
-    first attempt happened to sample). The other exactly 51 have no bracket tag at all and
-    are 100% the unrelated "ghost"/dissolve character materials (`Cs_Ghost_*`,
-    `Cs_ShadowMan`, etc. — MTDs like `Cs_Ghost_Param_Wander.mtd`), a clean, total split
-    with zero overlap either direction. New gate: `MTD.Contains("[M]") ||
-    MTD.Contains("[ML]")`, combined with requiring `g_Diffuse_2` itself present as a
-    belt-and-suspenders check. Also fixed the shader's specular fallback hint from
-    `hint_default_white` to `hint_default_black` — with specular now optional per layer,
-    an absent texture must default to zero metallic contribution (matching
-    `StandardMaterial3D`'s own default when `g_Specular` is absent), not full white/opaque
-    metallic. All 913 blend-material meshes under the new gate were confirmed to still
-    have the required ≥2 UV channels and vertex-color data before rebuilding.
-  - **Verification status: resolved.** A subsequent full reimport did complete all the way
-    through; the mid-batch crash flake and the one-off `m3008b1.flver`
-    `NullReferenceException` seen previously turned out to just be the already-documented
-    threaded-reimport flakiness, not a real regression from the gate fix — error count
-    landed back on the same 16 known files.
-- **Terrain blend used the wrong vertex-color channel (blending looked like "one texture
-  always wins, no smooth transition").** After the gate fix above, the shader itself
-  (`terrain_blend.gdshader`) was mixing `diffuse1`/`diffuse2` by `COLOR.r` (equivalently
-  `.g`/`.b` — R=G=B always, per the confirmation two entries up). User reported the blend
-  still didn't look smooth on real terrain pieces: one texture dominates a whole surface,
-  transitions look abrupt rather than gradual. Root cause, confirmed with data rather than
-  guessed: `VertexColor.R` is **not** the blend weight — it's a separate, mostly-1.0 signal
-  (vertex-baked AO/shadow: near 1.0 almost everywhere, dipping only in localized spots like
-  crevices/corners) that happens to also satisfy "non-constant, varies 0-1" (the check used
-  to confirm it two entries up — a necessary but not sufficient test, since AO data is
-  non-constant too). The real blend weight is `VertexColor.A`. Confirmed two independent
-  ways with a scratch console tool (`SoulsFormatsNEXT`-referencing, not committed) reading
-  raw FLVER0 vertex data directly, bypassing the importer entirely:
-  1. **Game-wide statistics** across all 907 blend meshes in `mounted/map` (516k vertices):
-     R and A are essentially uncorrelated (Pearson corr = 0.07). R's per-mesh mean is >0.9
-     for 713/907 meshes (78.6%) — classic "no occlusion" baseline with rare dips, not a
-     deliberately painted texture-mix weight. A has far higher variance (std 0.471 vs R's
-     0.226) and 608/907 meshes have a mean in the 0.3-0.7 band, consistent with genuinely
-     mixed painted regions.
-  2. **Per-triangle transition coverage on the known test file** (`m0002b1.flver`, Shrine
-     of Storms island/stairs — the file the original hard-seam bug report was against):
-     for every one of its 12 blend materials, the fraction of triangles whose 3 vertices
-     span a blend-value range >0.2 (i.e. an actual transition triangle, not flat) is
-     dramatically higher using A than using R — e.g. 88.1% vs 3.5% on one material, 74.4%
-     vs 66.7% on the narrowest gap, never the other way around across all 12 materials.
-     Using R meant the shader's `mix()` picked essentially the same texture across nearly
-     an entire surface, only dipping toward the other layer in the sparse AO-crevice spots
-     — exactly the reported symptom.
-  Fixed by changing `terrain_blend.gdshader`'s `float blend = COLOR.r` to `COLOR.a`. No
-  importer C# change and no new/changed shader uniforms, so no reimport was needed —
-  spot-checked by reimporting `m0002b1.flver` alone (clean, no new errors) rather than
-  re-running the full ~1776-file baseline.
-  - **Follow-up: R is not vertex AO — tried, visually disproven, reverted.** R's
-    AO-shaped statistics (mostly ~1.0, non-constant, uncorrelated with A) were originally
-    read as "vertex-baked AO/shadow, darkens near crevices" and wired in as
-    `ALBEDO *= COLOR.r`. User reported patchy, sharp-edged light/dark borders on
-    Boletarian Palace terrain (concretely reproducible on `m0201b0.flver`,
-    `mounted/map/m02_00_00_00/`) persisting even with the sun disabled — confirming it was
-    the multiply itself, not a lighting interaction — and confirmed absent from the real
-    game. Direct inspection of that file's vertex data settled it: **R only ever takes
-    exactly two discrete values per mesh — e.g. `1.000` or `0.549` (≈140/255), nothing in
-    between** (checked via full frequency histogram, not just min/max). It's a binary
-    per-vertex flag, not a shading gradient, so multiplying it into albedo produces a hard
-    on/off split with no falloff wherever it flips — exactly the reported symptom. What R
-    actually encodes is unknown (a material sub-variant switch, a wetness/puddle mask, a
-    surface-type tag for footstep sounds — no way to tell from geometry data alone).
-    Reverted `ALBEDO *= COLOR.r`; R is read (as part of the full `VertexColor` struct) but
-    deliberately left unused in the shader again. Lesson: "matches an AO-like statistical
-    shape" (skewed near 1, non-constant) is necessary but nowhere near sufficient to
-    confirm a channel is a shading gradient — always check whether values are actually
-    continuous before wiring something into a multiply, not just their range/skew.
-  - Also verified while investigating: UV channel 1 (used for `diffuse2`'s own UV, distinct
-    from UV channel 0's `diffuse1`) tiles at a wide range nearly matching UV channel 0's
-    range (e.g. U -1.696..12.018 vs -1.678..11.991 on one mesh) — i.e. two independent but
-    similar diffuse unwraps — while UV channel 2 stays confined to ~[0,1], matching the
-    already-documented lightmap-UV description in CLAUDE.md's deferred-work section. This
-    confirms the existing UV0→diffuse1/UV1→diffuse2/UV2→(future)lightmap assignment in
-    `FlverSceneImporter.cs` is correct and was **not** part of this bug.
-- **Water surfaces added (new material family, not a bug fix).** A material-landscape
-  survey (prompted by the terrain-blend work above) found `g_Envmap` used on exactly 58
-  materials across 45-56 distinct map files (58 material *instances*; 56 distinct file
-  *paths* since the same basename recurs across areas — the two counts aren't the same
-  thing), 100% of them the `DS_Water_Env`/`DS_Water_Env_Skin` MTD family (`g_BlendMode`
-  `Water`/`WaterWave`) and nowhere else in the game's 8889 materials — confirmed via a
-  scratch console tool reading raw FLVER0 material data directly. These materials carry
-  only `g_Bumpmap`+`g_Envmap`, no diffuse texture at all, so before this they imported
-  with no albedo (blank/undefined-looking). Investigated properly before writing a shader:
-  - **`g_Envmap` is not a cubemap.** Decoded a real one (`m05_env_00.tga`, 128×128) to PNG
-    with a scratch tool (`Headerizer` + `Pfim`, same path `DecodeTexture` already uses) and
-    viewed it directly — a small flat "impression" image of a rocky scene, not 6 cubemap
-    faces or an equirectangular panorama. Handled in-shader as a matcap-style lookup
-    (reflected view-space normal's XY as UV) — the standard cheap PS3-era substitute for
-    real reflections, and the only technique that makes sense for a single flat image like
-    this. `g_Bumpmap` decoded to an ordinary tangent-space wave normal map, as expected.
-  - **Real per-material tuning only exists in the actual `.mtd` file, not FLVER0's own
-    data.** WitchyBND has, at some point since this project started, unpacked
-    `mtd.mtdbnd.dcx` into `mounted/mtd/` (306 real, parseable `.mtd` files) — this predates
-    the last few sessions' work but wasn't noticed until the material survey; the
-    "Alpha/cutout materials" bug entry above is stale on this point (kept as-is, corrected
-    inline, since it explains why that fix used a filename heuristic at the time).
-    `SoulsFormatsNEXT` already has a working `MTD.cs` reader. Dumped full params for 3
-    different water `.mtd` files and found real, materially-different per-material tuning
-    (e.g. `g_TexScroll_0` of `0.01`/`0.03`/`-0.1`, `g_FresnelPow` of `3`/`4`/`7`,
-    `g_WaterColor` differing per body of water) — confirmed this wasn't boilerplate/default
-    data worth hardcoding once. `FlverSceneImporter.cs` now indexes every real `.mtd` by
-    filename once at construction (`_mtdIndex`, eager field init like `_blendShader` —
-    306 small files is cheap enough to not bother with lazy init) and reads the real file
-    per water material for `water.gdshader`'s uniforms (tile scale/scroll/blend per bump
-    layer, water tint, Fresnel curve), falling back to the shader's own generic-water
-    uniform defaults if a material's `.mtd` can't be resolved.
-  - **Gate is texture-based, not filename-based, and confirmed necessary to be so.**
-    Some MTDs with "water" in the filename (e.g. `m99_water01[dsb]_alp.mtd`,
-    `a05_water02[dn]_add.mtd`) are actually plain alpha-blended splash effects on the
-    ordinary single-layer shader family — a filename-substring check would have wrongly
-    special-cased them. `g_Envmap`'s presence is the actual, exclusive, confirmed signal.
-  - **A real, generalizable Godot/C# gotcha found while wiring this up** — see the interop
-    gotchas section below (`SetShaderParameter` + `source_color`-hinted `vec3` uniforms).
-  - **Verification status: mechanically confirmed, not yet visually confirmed.** All 56
-    water-bearing files reimport with no errors (only the pre-existing, unrelated
-    `m9900.flver` crash showed up, from an incidental wider reimport after rebuilding the
-    assembly). Confirmed via headless script that real, distinct per-material MTD data
-    (different `water_color`/`fresnel_pow`/`tile_scale` per file) is actually reaching the
-    shader, not just defaults. **Not yet looked at in the editor** — the shader's actual
-    look (matcap reflection quality, wave animation, screen-space refraction) hasn't been
-    checked against the real game the way terrain blending was.
-  - **Follow-up: all water looked the same regardless of material (`g_WaterColor`'s alpha
-    was silently discarded).** User confirmed most water looked good (Boletaria's moat,
-    fairly accurate) but Valley of Defilement's swamp — the large piece past Leechmonger —
-    looked like "the same regular water effect," "crudely stretched," not murky/opaque
-    like real swamp mud. Investigated by comparing the two materials' real `.mtd` data
-    directly rather than guessing: Boletaria (`a01_water[we].mtd`) has `g_ReflectBand=0.1`,
-    `g_RefractBand=0.05`; Defilement (`a04_water[we].mtd`) has `g_ReflectBand=0` (**no**
-    reflection at all) and `g_RefractBand=0.15`. Both were already confirmed reaching the
-    shader correctly (headless check on the actual imported material, not just the source
-    `.mtd`), ruling out an `_mtdIndex` resolution failure. Also ruled out a UV/world-scale
-    mismatch theory (mesh too big → texture stretched): checked world-units-per-UV-unit on
-    both meshes and it's nearly identical (~19-20) despite Defilement's mesh being roughly
-    the same size as Boletaria's (Boletaria's is if anything *larger*, 1477×902 vs
-    1187×1236) — so mesh size wasn't it either. Root cause: with `g_ReflectBand=0`,
-    Defilement's water should show almost nothing *but* the tinted, distorted
-    screen-refraction of whatever's behind it — but the shader had no way to make that
-    refraction *opaque*, so it always looked like see-through water no matter the tint,
-    and the refraction-UV distortion (`N.xy * refract_band`) visibly smearing a large
-    expanse of background across a big flat swamp reads exactly as "crudely stretched."
-    `g_WaterColor` is actually a Float4, not a Float3 — its 4th component had been read
-    into `GetMtdColor3` (which only keeps the first 3) and never used. Checked it across
-    all 17 water `.mtd` files game-wide: Defilement's alpha is `0.784` vs. Boletaria's
-    `0.588` — *higher*, not lower, exactly the direction needed for "more opaque swamp,
-    less opaque moat," confirming it's real opacity data, not noise. Added a `water_alpha`
-    uniform (read via a small new `GetMtdFloat4Alpha` helper) and blend the refraction
-    toward a flat, fully-opaque `water_color` by that amount before mixing in reflection —
-    `vec3 surface = mix(refraction, water_color, water_alpha); ALBEDO = mix(surface,
-    reflection, fresnel);`. Re-verified both files reimport clean and the new uniform
-    reads back correctly per-material (0.784 vs 0.588) via the same headless-inspection
-    method as before. **Still not yet visually confirmed** — this fix is a well-evidenced
-    hypothesis from real per-material data, not something rendered and looked at.
-  - **Follow-up 2: coloring fixed, but still "very reflective/watery" not muddy, and
-    "none of the water has ever been see-through" (both before and after the alpha fix).**
-    Checked whether unused real MTD params explained it before guessing at a fix:
-    - `g_SpecularPower` is a **constant 100 across every single water material in the
-      game** (checked all 17 real `[we].mtd` files) - not usable as a per-material
-      roughness signal, ruling out the obvious "derive roughness from specular power"
-      approach before it was tried.
-    - The actual cause: `ROUGHNESS` was a fixed `0.05` constant for every water material,
-      completely separate from the manual `reflect_band`-scaled matcap reflection term
-      above it. Godot's own automatic PBR specular/Fresnel response runs regardless of that
-      manual term, and real dielectric Fresnel reflectance climbs toward ~100% at grazing
-      angles *regardless of roughness* - what a low roughness does is concentrate that into
-      a sharp mirror-like glint instead of spreading/dimming it, which is what actually
-      reads as "reflective" vs "matte" to the eye. So swamp water stayed glossy-mirror-like
-      at grazing angles even with the manual reflection correctly zeroed. Fix: derive
-      `ROUGHNESS`/`SPECULAR` from `g_ReflectBand` too (confirmed to only take `0` or `0.1`
-      across every water material in the game, so a `clamp(reflect_band/0.1, 0, 1)` mix
-      covers the full real range, not an arbitrary guess) - `0.6`/`0.05` (rough, dim) at
-      `ReflectBand=0` vs `0.02`/`0.5` (glossy) at `0.1`.
-    - For "never see-through": found `g_WaterFadeBegin` (real data, varies `0.3`-`1.0`
-      game-wide, previously read nowhere) - name and value range strongly suggest a
-      shallow/deep transition distance, the mechanism that would let a shoreline show the
-      bottom while open water stays opaque, which nothing in the shader modeled at all
-      (`water_alpha` was applied uniformly across the whole surface regardless of depth).
-      Verified the exact Godot 4 API for this via web search rather than guessing
-      (`INV_PROJECTION_MATRIX`, `hint_depth_texture`, `SCREEN_UV`, `VERTEX`'s view-space
-      meaning) before writing it - see sources below. Added a `depth_tex` sampler,
-      reconstructed the view-space position of whatever's behind each water pixel, and
-      scaled `water_alpha` by `clamp(depth_diff / water_fade_begin, 0, 1)` so shallow water
-      fades toward fully see-through and only reaches the real opacity once genuinely deep.
-    - Re-verified: both files still reimport clean, `water_fade_begin`/`reflect_band`/
-      `water_alpha` all read back correctly per-material. **Could not verify the shader
-      actually compiles or renders correctly** - headless Godot here uses a dummy render
-      driver with no real GPU, so GLSL is never actually compiled in this environment; the
-      C#/data-pipeline side is confirmed, the shader math is not, until looked at in the
-      editor. Sources used for the Godot 4 depth-reconstruction API:
-      [Godot spatial shader reference](https://docs.godotengine.org/en/stable/tutorials/shaders/shader_reference/spatial_shader.html),
-      [Godot Forum: view-space position from depth texture](https://forum.godotengine.org/t/shader-to-get-view-space-position-from-depth-texture-inv-projection-matrix/101389).
-  - **Follow-up 3: two real bugs, confirmed with actual screenshots this time (first time
-    this shader has been looked at instead of only data-checked).** User provided two
-    screenshots. Boletaria's moat: nearly black and flat, needed the sun boosted to 3x and
-    sky to 2x just to see it was water at all. Valley of Defilement: coloring/depth-fade
-    correctly subtle now, but covered in chaotic diagonal streaks reading as "still very
-    reflective."
-    - **Streaking root cause:** `refract_band` (real range `0.05`-`0.8`) was being used
-      directly as a `SCREEN_UV` offset for the refraction sample - but `SCREEN_UV` is 0-1,
-      so even `0.15` is 15% of the whole screen. On a large, near-edge-on water surface,
-      adjacent pixels sample wildly different, unrelated parts of the rendered scene,
-      producing exactly this kind of smear. Fixed by scaling the offset down and hard-
-      clamping it (`refraction_scale = 0.03`, clamped to ±0.03) - **this specific
-      magnitude is an uncalibrated guess**, unlike everything else in this shader; the
-      real MTD data has no visibility into what unit/space the original shader actually
-      applied `g_RefractBand` in.
-    - **Black/flat root cause (the more fundamental bug):** the whole hand-computed
-      reflection+refraction+Fresnel result was written to `ALBEDO`. Godot's PBR model
-      shifts energy from diffuse to specular as `ROUGHNESS` drops (physically correct -
-      smooth surfaces have little diffuse response), and the previous round's fix had
-      pushed `ROUGHNESS` down to `0.02` for reflective water. With no real sky/reflection
-      probe set up in the scene for a near-mirror surface to actually reflect, and `ALBEDO`
-      only visible via the (now nearly-zero) diffuse term, the computed color became
-      almost entirely invisible regardless of scene light intensity - matching "had to
-      crank the sun 3x and still barely see it" exactly. This was always going to be a
-      structural mismatch: this shader was never meant to be a physically-based surface
-      plugged into Godot's lighting model - it's a self-contained, hand-tuned final color,
-      the same way the original PS3 `DS_Water_Env.spx` almost certainly worked internally
-      (its own Fresnel/reflect/refract math baked straight to output, not routed through a
-      generic BRDF). Fixed by writing the result to `EMISSION` instead of `ALBEDO`
-      (`ALBEDO` set to `vec3(0)`), which is always visible regardless of scene lighting or
-      roughness - `ROUGHNESS`/`SPECULAR` (still `g_ReflectBand`-derived) now only add a
-      small *extra* real specular sun-glint on top, not the primary reflective effect.
-    - Both fixes are shader-only (no new/changed uniforms, no C# change) - live-reloads,
-      no reimport needed. Sanity-checked both test scenes still load without error;
-      **cannot verify the actual rendered look from here** (still no real GPU in this
-      headless environment) - waiting on a fresh look/screenshot.
-  - **Follow-up 4: streaking diagnosis corrected by the user, wave tiling fixed; brightness
-    still open, waiting on real data instead of a third guess.** User corrected the
-    "refraction sampling garbage" theory from follow-up 3 directly: the streaks are
-    real reflections *of the scrolling wave/bump pattern itself* - i.e. the wave tiling
-    really is too large-scale ("stretched"), confirming the very first (later abandoned)
-    hypothesis from when water was first implemented. Fixed by adding a flat
-    `wave_detail_scale` multiplier (`12.0`) applied to the whole bump-sample coordinate
-    (tiling and scroll together, so animation speed stays proportional to the new denser
-    tile size) - **this constant is an uncalibrated guess**, same caveat as
-    `refraction_scale`.
-    - Separately, user provided two real DeS gameplay screenshots of the actual Boletaria
-      moat (character on the bridge looking down, sun/lighting as the genuine game
-      renders it, not our editor's sun) to use as a brightness reference, and confirmed
-      the moat is still "way too dark" even under ambient-only lighting in the editor
-      (specifically testing with the sun off, since PS3 Demon's Souls had no global
-      dynamic sun - lighting there is more likely close to what our `EMISSION`-driven,
-      lighting-independent approach should already produce regardless of scene light).
-      Sampled the actual reference screenshots directly (`magick ... -resize 1x1!`) rather
-      than eyeballing: the moat reads at roughly 10-11% sRGB brightness in a decently-lit
-      strip (darker, ~2-4%, in shadow) - dim but not black. **Did not guess at a fix here** -
-      have no current-Godot screenshot to sample against for a real before/after
-      comparison, and two guesses already turned out wrong this session (the AO-as-
-      shading-multiply idea, and the "refraction sampling garbage" streaking theory) - a
-      third blind guess on an even less certain question (exact linear-light magnitude
-      of a multi-term shader blend) isn't worth it when one more screenshot would give an
-      actual number to hit instead.
-  - **Follow-up 5: Defilement confirmed close (17% Godot vs 18-22% real, sampled directly
-    from screenshots both times), Boletaria still dark - and the project has no
-    WorldEnvironment/tonemap configuration anywhere, which is very likely why.** User
-    corrected the streaking diagnosis again: it *is* real reflection of the scrolling wave
-    pattern (matching follow-up 4's fix), just now reading as "intense and squashed" at
-    `wave_detail_scale=12` - may need dialing back, not yet done since it wasn't the
-    question asked this round. Dumped and compared the full real `.mtd` data for both
-    materials side by side (not just the subset checked before): Boletaria's
-    `g_FresnelColor` is pure white `(1,1,1)` vs Defilement's dim teal `(0.196,0.353,
-    0.329)`, `g_FresnelPow` is a steeper `4` vs `3`, alpha is lower (`0.588` vs `0.784`,
-    meaning more weight on refraction, less on the flat tint). These are real,
-    already-correctly-used differences, but hand-calculating the shader's own math with
-    them suggests Boletaria should land around ~35-40% linear-ish brightness, nowhere
-    near the observed ~7% sRGB - meaning the per-material data isn't the (whole) story.
-    Searched the project for any `WorldEnvironment`/tonemap/exposure configuration
-    (`.tscn` files, `.tres` resources, `project.godot` rendering settings, `.godot/`
-    auto-generated defaults) and **found none at all** - the user's sun/sky adjustments
-    are almost certainly the 3D editor viewport's own built-in ad-hoc preview toggles
-    (View > Environment), not a real configured environment resource, meaning there is no
-    controlled tonemap/exposure baseline anywhere and the two materials are being judged
-    under whatever the editor's default preview happens to do - which especially punishes
-    Boletaria's screen-refraction-heavy math (41% of its "surface" weight, vs
-    Defilement's dominant flat murky tint) since refraction inherits however dim the
-    *rest* of the ambient-only scene happens to render. This directly extends the same
-    root cause the user already suspected for Defilement's fog/effects ("more accurate
-    once we get proper environments set up") to Boletaria too, just manifesting as
-    tonemap/exposure crush instead of fog occlusion. Not fixed - this isn't a shader bug
-    to patch, it's a missing testing prerequisite; offered to build a minimal, clearly-
-    scoped test `WorldEnvironment` (not the real Phase 2 environment system) so future
-    material comparisons have a controlled, reproducible baseline instead of the editor's
-    opaque default preview.
-  - **Noticed in passing, not yet acted on:** `a06_lava[we].mtd` exists — lava uses this
-    same `DS_Water_Env`-family shader (`g_Envmap`-gated), so it's currently importing
-    through `water.gdshader` (a reflective/refractive liquid look), which is almost
-    certainly wrong for lava (should be opaque, glowing/emissive). Not fixed — flagging
-    for whenever lava specifically comes up, since it wasn't part of what was reported.
+- **Missing terrain ground-blend layer (hard seams between grass/dirt/stone).** A
+  family of map materials carry a *second* texture set (`g_Diffuse_2`, optionally
+  `g_Specular_2`/`g_Bumpmap_2`) meant to blend with the first via FLVER's
+  `VertexColor`; the importer only read the first set. Fixed via a `ShaderMaterial`
+  (`terrain_blend.gdshader`), gated on FromSoft's own `[M]`/`[ML]` MTD bracket tag —
+  **not** on `g_Specular_2`/`g_Bumpmap_2` presence, which is independently optional
+  per layer and was tried first; it wrongly excluded real grass/cliff materials that
+  simply lack a specular layer, confirmed via a 963-material game-wide scan (912 have
+  the bracket tag with all four specular/bumpmap combinations present across them; the
+  other 51 are unrelated "ghost"/dissolve character materials, a clean split with zero
+  overlap). Also fixed the shader's specular fallback hint to `hint_default_black`
+  (zero metallic contribution when absent, matching `StandardMaterial3D`'s own
+  default) now that specular is confirmed optional per layer.
+  - **Blend weight is `VertexColor.A`, not `.R`/`.G`/`.B`** (R=G=B always — confirmed
+    non-constant, so "varies 0-1" alone isn't sufficient proof of which channel is the
+    real blend weight). Confirmed via game-wide correlation stats (R and A
+    essentially uncorrelated, R's mean is >0.9 on 78.6% of meshes — a "no occlusion"
+    baseline, not a painted mix weight) and per-triangle transition coverage on a real
+    test file (A shows dramatically more actual blend-transition triangles than R
+    across all 12 materials checked). Fixed `terrain_blend.gdshader`'s
+    `float blend = COLOR.r` → `COLOR.a`.
+  - **R is not vertex AO — tried, visually disproven, reverted.** R's AO-like
+    statistics (mostly ~1.0, non-constant) were wired in as `ALBEDO *= COLOR.r`, but
+    produced sharp patchy light/dark borders even with the sun off. Direct inspection
+    showed R only ever takes exactly two discrete values per mesh (e.g.
+    `1.000`/`0.549`, nothing between) — a binary per-vertex flag, not a shading
+    gradient. Reverted; what R actually encodes is still unknown. **Don't re-try
+    "resembles an AO statistical shape" as confirmation** — check whether values are
+    actually continuous before wiring anything into a multiply.
+  - Verified: full reimport lands on the same known error set; UV channel assignment
+    (UV0→diffuse1, UV1→diffuse2, UV2 reserved for the future lightmap, per CLAUDE.md's
+    deferred-work section) was double-checked and confirmed correct, unrelated to
+    this bug.
+- **Water surfaces added (new material family, not a bug fix).** `g_Envmap` is used on
+  exactly one MTD family (`DS_Water_Env`/`DS_Water_Env_Skin`) and nowhere else in the
+  game's 8889 materials — confirmed via direct scan, so gating on the texture's
+  presence (not a filename heuristic — some "water"-named MTDs are actually plain
+  alpha-blended splash effects on the ordinary shader) is exact and sufficient. These
+  materials carry only `g_Bumpmap`+`g_Envmap`, no diffuse. Added
+  `addons/archstone/water.gdshader`:
+  - `g_Envmap` is a small flat "impression" image (confirmed by decoding and viewing
+    one), not a cubemap — handled as a matcap-style lookup (reflected view-space
+    normal's XY as UV), the standard cheap PS3-era substitute for real reflections.
+  - Real per-material tuning (tile scale/scroll, water tint, Fresnel curve) only
+    exists in the actual `.mtd` file, not FLVER0's own data — confirmed materially
+    different values across real files, not boilerplate. `FlverSceneImporter.cs`
+    indexes every `.mtd` once at construction (`_mtdIndex`) and reads the real file
+    per water material, falling back to the shader's generic defaults if
+    unresolvable.
+  - **`g_WaterColor` is a Float4, not Float3 — its alpha (`water_alpha`) was being
+    silently discarded**, which is what actually separates murky/opaque water (e.g.
+    Valley of Defilement's swamp) from clear reflective water (e.g. Boletaria's
+    moat). Fixed by blending the refraction toward a flat, fully-opaque tint by that
+    amount, further scaled by a depth-based shore/deep fade (`g_WaterFadeBegin` +
+    `hint_depth_texture`/`INV_PROJECTION_MATRIX` reconstruction — Godot 4's
+    depth-texture API confirmed via the
+    [spatial shader reference](https://docs.godotengine.org/en/stable/tutorials/shaders/shader_reference/spatial_shader.html)
+    and [this forum thread](https://forum.godotengine.org/t/shader-to-get-view-space-position-from-depth-texture-inv-projection-matrix/101389)
+    rather than guessed) so shallow edges stay see-through even on otherwise-murky
+    water.
+  - **`ROUGHNESS`/`SPECULAR` derive from `g_ReflectBand`** (confirmed constant `0` or
+    `0.1` game-wide; `g_SpecularPower` was checked and is a constant `100` everywhere,
+    not usable as a per-material signal), adding a small extra real specular
+    sun-glint on top of the manual reflection term.
+  - **The whole reflection/refraction/Fresnel result is written to `EMISSION`, not
+    `ALBEDO`** (`ALBEDO = vec3(0)`). Writing it to `ALBEDO` made it nearly invisible —
+    Godot's PBR shifts energy from diffuse to specular as `ROUGHNESS` drops, and
+    there's no real reflection probe in-scene for a low-roughness "mirror" to
+    reflect. This is a self-contained, hand-computed color the same way the original
+    PS3 shader almost certainly worked internally, not a physically-based surface
+    meant to plug into Godot's lighting model.
+  - **Two genuinely uncalibrated constants, unlike everything else here** (no real
+    MTD data gives visibility into the units the original shader used): a
+    refraction-sample `SCREEN_UV` offset scale (`refraction_scale = 0.03`, hard-
+    clamped — `g_RefractBand`'s real range of `0.05`-`0.8` is far too large to use
+    directly against a 0-1 `SCREEN_UV`) and a wave-tiling detail multiplier
+    (`wave_detail_scale = 12.0` on the bump-sample coordinate — raw UV tiled at
+    ~40-95 world units per repeat on large meshes, confirmed by the user as the
+    cause of a "stretched, reflective-looking" wave pattern).
+  - `a06_lava[we].mtd` also matches this `g_Envmap` gate and currently renders
+    through this same shader — almost certainly wrong for lava (should be opaque/
+    emissive, not a reflective liquid). Not fixed, noticed in passing.
+  - **Visual accuracy tuning is deliberately paused, not abandoned or broken.**
+    Coloring/depth-fade/tiling were confirmed reasonably close against real
+    screenshots (Defilement's sampled brightness matched within a few percent);
+    Boletaria's remaining gap traced to there being **no `WorldEnvironment`/tonemap/
+    exposure configuration anywhere in this project** — checked directly, none
+    exists — so all comparisons so far have been against the 3D editor's own
+    uncontrolled default preview lighting, not a real baseline. See "Deferred by
+    design, not forgotten" below; revisit once real lighting/environment work
+    happens (`PLAN.md`).
+  - **A real, generalizable Godot/C# gotcha found while wiring this up** — see the
+    interop gotchas section below (`SetShaderParameter` + `source_color`-hinted
+    `vec3` uniforms).
 - **Cross-category texture reuse (a corpse pile rendering fully white, `m4020b0.flver`
   in Boletarian Palace).** User reported a specific pit-of-corpses map piece with no
   textures at all. Root cause: its material referenced `Model/chr/c2000/tex/...` - a
@@ -659,6 +438,96 @@ cause was confirmed — noted so the same wrong turn isn't re-taken.
     general class of threaded-reimport-host flakiness already documented below, just a
     silent stall instead of a crash this time - re-running is still the correct recovery.
 
+- **Non-visual game-logic data investigation (curiosity-driven, not a bug report -
+  findings scoped for the future Phase 2 gameplay-recreation work, see PLAN.md).** User
+  asked what, if anything, outside `PS3_GAME/USRDIR` could ever matter to the
+  recreation (`PARAM.SFO`, `ICON0.PNG`, `TROPDIR`) - none of it does, it's all PS3
+  platform/packaging metadata (boot info, XMB icon, PSN trophy definitions), not game
+  content. Then asked the harder question: with `EBOOT.BIN` itself correctly ruled out
+  as off-limits (it's Sony's encrypted SELF container - decrypting it is DRM
+  circumvention, the same category this project's own README disclaimer already rules
+  out), is any of the *gameplay logic* people would assume only exists in that compiled
+  executable actually available another way? Investigated directly against the real
+  mounted dump rather than guessing from general Souls-series knowledge.
+  - **Full raw-root top-level layout, confirmed by listing it directly:** `chr`, `map`,
+    `obj`, `parts`, `mtd` (the categories `AssetExtractor` already handles), plus
+    `param`/`paramdef`, `script`, `msg`, `font`, `menu`, `facegen`, `item`, `sfx`,
+    `sound`, `shader`, `remo`, `testdata`, `tropdir`, and `EBOOT.BIN`. `shader` (PS3 GPU
+    microcode) is irrelevant regardless - this project already hand-writes its own Godot
+    shaders (`terrain_blend.gdshader`/`water.gdshader`) from MTD parameters rather than
+    using the original shader binaries at all.
+  - **`script/` is plain, unencrypted Lua - same approach as DS1, confirmed not
+    guessed.** 272 loose `.lua` files (map event scripts, `_eventboss` variants, a
+    `global_event.lua`) plus `script/ai/out/` holding the shared goal-oriented AI
+    library (`top_goal.lua`, `walk_around.lua`, `attack2.lua`/`attack3.lua`, etc.) and
+    per-enemy-ID behavior files (`823000_battle.lua`, `510000_logic.lua`). Opened one
+    directly: plain Shift-JIS-commented Lua source, human-readable as-is. Per-map
+    `.luabnd` containers also exist (`m01.luabnd`) - read one with
+    `SoulsFormats.BND3.Read()` (the exact same reader `AssetExtractor.cs` already uses):
+    49 entries, real BND3 magic, bundling that map's own event scripts plus the entire
+    shared AI library plus that map's specific enemy roster's behavior scripts. Each
+    `.luabnd` also has a `.dcx` sibling (still fully open, `DCX`/`BND3` already handle
+    it) and a `.sdat` sibling - checked that one's header too: `NPD`, Sony's
+    encrypted/signed edata wrapper, the same DRM category as `EBOOT.BIN`. The plain and
+    `.dcx` forms are the disc-native ones and already fully readable; `.sdat` is a
+    redundant encrypted copy (likely for a different distribution channel) that should
+    be skipped by extension if `script` is ever added to
+    `AssetExtractor.KnownCategories`, not chased.
+  - **`param`/`paramdef` confirmed readable via `SoulsFormats.PARAMDEF.Read()` against
+    real files, and DeS ships its own paramdefs** - unlike later titles (DS2/DS3/Elden
+    Ring), which need the community `Paramdex` project's reconstructed schemas, this
+    game's own dump already has everything needed to parse its params. Checked real
+    field names directly (not assumed from other games) across `AtkParam`,
+    `BehaviorParam`, `NpcParam`, `EquipParamWeapon`, `SpEffectParam`, `NpcAtkParam`,
+    `CharaInitParam`, `AiStandardInfo`, `EnemyStandardInfo`, `GameInfoParam`: stamina
+    cost/regen/damage is fully exposed as literal fields everywhere you'd expect it
+    (`AtkParam.stamina`, `NpcParam.stamina`/`staminaRecoverBaseVel`,
+    `EquipParamWeapon.attackBaseStamina`, `SpEffectParam.changeStaminaRate`, etc). DeS's
+    poise-like mechanic is internally called **Super Armor**, not Poise -
+    `NpcParam.superArmorLimitDamage`/`superArmorLimitTime`,
+    `EquipParamWeapon.attackSuperArmor`, `AtkParam.atkSuperArmor` - and there's no
+    separate DS1-style "Poise stat reduces hitstun" field in any table checked; fan
+    terminology and FromSoft's own internal naming diverge here. No literal
+    invincibility/i-frame field found anywhere across all tables checked.
+  - **Followed that gap into animation data - `.tae` (Time Act Event) files are real,
+    unencrypted, and already parse.** `chr/c0000/c0000.anibnd` (real BND3, confirmed via
+    magic bytes) bundles a `.tae` file per animation set (`a00.tae`, `a10.tae`, etc,
+    alongside the raw `skeleton.hkx`) - these are exactly per-animation timed-event
+    files, the category of thing that would encode dodge-roll invincibility windows and
+    hit-cancel timing in later Souls games. `SoulsFormats.TAE.Read()` parses `a00.tae`
+    directly with zero errors: 386 real animations, auto-detected as
+    `TAEFormat.DES` - a Demon's-Souls-specific format variant the library already
+    explicitly, distinctly supports (separate from `DS1`/`DESR`/`DS3`/`SOTFS`/`SDT`).
+    Each event carries precise start/end timestamps in seconds and a numeric event
+    `Type` (observed values include 0, 16, 128, 225, 229) - the raw structure is fully
+    present and working today. What's missing: event `Type` IDs have no friendly name
+    without an external template (`TAE.Template`, paired with the `EDD` format for
+    names - the same relationship `PARAMDEF` has to `PARAM`) - none sourced or built for
+    DeS specifically yet, so today this reads as numbered event slots, not yet
+    "invincibility"/"hitbox"/"sound cue" by name.
+  - **Per-character `.esd` files exist too** (`c0000.esd`/`.esd.dcx`/`.esd.dcx.sdat` -
+    same plain/compressed/NPD-encrypted three-way pattern as `.luabnd` above). ESD
+    (state machine format, `SoulsFormats.ESD` already exists) likely governs
+    animation/behavior state transitions - not opened or tested this session, flagged
+    for whenever this becomes relevant rather than left silently unknown.
+  - **Web search for community-documented reference values found a real split, not a
+    total gap.** Stamina regen has a solid, sourced formula (Fextralife: 45/s base,
+    Eternal Warrior's Ring +12/s, specific stacking penalties for slow-roll/overburden/
+    blocking) and roll-type/equip-burden tiers are well documented (≤50% burden = fast
+    roll/max i-frames, above that a slower "fat roll" with fewer i-frames, no benefit
+    below 30%) - both good enough to implement with real confidence. Precise i-frame
+    counts and per-weapon Super Armor frame windows are **not** publicly documented
+    anywhere found for Demon's Souls specifically - contrast with Dark Souls 3, which
+    the community has mapped in detail - a genuine documentation gap for this one
+    title, confirmed by multiple targeted searches turning up only qualitative
+    descriptions ("invincible for roughly the first third of the roll"), not numbers.
+  - **Bottom line:** none of the above needs any DRM circumvention. `script`/`param`
+    are trivial extensions of the extraction system already built (add to
+    `AssetExtractor.KnownCategories`, skip `*.sdat`); TAE reading needs an event-type
+    naming template before its semantics are usable, and the specific numeric constants
+    Fextralife etc. don't cover will likely need direct frame-by-frame observation
+    against the real game in RPCS3 - but none of that is a wall, just remaining work.
+
 ## C#/Godot interop gotchas worth remembering
 
 - `EditorSceneFormatImporter._ImportScene`'s exact signature
@@ -706,31 +575,18 @@ cause was confirmed — noted so the same wrong turn isn't re-taken.
 
 ## Environment specifics (this machine)
 
-- No .NET 8 runtime is installed system-wide (Arch dropped the package) — Godot 4.7's
-  own `GodotTools.dll` (the "build solutions" / project-generation feature) hardcodes a
-  `net8.0` target with `rollForward: LatestMinor`, which does **not** cross major
-  versions, so it can't fall back to the installed 9/10 runtimes. `GodotPlugins.dll`
-  (the main C# script host used at editor runtime) uses `rollForward: LatestMajor`
-  instead and *can* fall back — which is why the editor itself could still run C# before
-  the runtime was fixed, while `--build-solutions` specifically hung.
-- Fix: installed net8 via Microsoft's `dotnet-install.sh` into `~/.dotnet-godot`, then
-  symlinked the system SDK and other runtimes into that *same* root
-  (`~/.dotnet-godot/sdk/10.0.110`, `~/.dotnet-godot/shared/Microsoft.NETCore.App/9.0.18`
-  and `10.0.10`) so `DOTNET_ROOT=~/.dotnet-godot` sees everything at once. Pointing
-  `DOTNET_ROOT` at an isolated net8-only install instead hides the system SDK entirely
-  and produces a *different* failure ("`.NET Sdk not found`") — don't do that, merge via
-  symlinks into one root instead.
-- **Superseded 2026-07-20:** the "Arch dropped the package" premise above was wrong —
-  `dotnet-sdk-8.0` is in Arch's official `extra` repo and installs cleanly
-  (`pacman -S dotnet-sdk-8.0`), landing in `/usr/share/dotnet` alongside the 9.0/10.0
-  SDKs Arch's plain `dotnet-sdk` package pulls in, no merging needed. Confirmed by
-  installing it and running both `dotnet build Soulbrandt.csproj` and
-  `godot-mono --headless --editor --path . --import` with `DOTNET_ROOT` unset and `PATH`
-  restricted to system dirs only — build succeeded, import ran through the full
-  `update_scripts_classes`/editor-layout sequence with none of the old failure modes
-  (no hang, no ".NET Sdk not found"). `~/.dotnet-godot` and every `DOTNET_ROOT=` prefix
-  are removed from CLAUDE.md/CONTRIBUTING.md as of this note; if this regresses on a
-  future Arch update, the merged-root workaround above is the fallback to rebuild.
+- **Net8 runtime: no special setup needed on Arch (superseded 2026-07-20).** Godot
+  4.7's `GodotTools.dll` (the "build solutions" feature) hardcodes a `net8.0` target
+  with no cross-major `rollForward`, but `dotnet-sdk-8.0` is in Arch's own `extra`
+  repo and installs cleanly alongside newer SDKs (`pacman -S dotnet-sdk-8.0`), no
+  `DOTNET_ROOT` override needed — confirmed by running both `dotnet build
+  Soulbrandt.csproj` and a full headless import with `DOTNET_ROOT` unset. An earlier
+  revision of this doc wrongly assumed Arch didn't package a net8 SDK at all and used
+  a manually-merged `~/.dotnet-godot` root as a workaround; that premise was wrong
+  and the workaround is obsolete. If this regresses on a future Arch update, merge a
+  fresh net8 install into one root with the existing system SDKs via symlinks rather
+  than pointing `DOTNET_ROOT` at an isolated net8-only install (see the dead-ends
+  entry below on why isolating it breaks SDK discovery).
 - `godot-mono --headless --build-solutions` hangs indefinitely in this environment even
   with the runtime fixed, for reasons never fully root-caused beyond "something in
   Godot's own in-process MSBuild invocation." Given up on making it work; `Boletaria.csproj`

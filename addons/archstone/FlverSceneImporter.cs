@@ -77,13 +77,11 @@ public partial class FlverSceneImporter : EditorSceneFormatImporter
 			: new Dictionary<string, TPF.Texture>(StringComparer.OrdinalIgnoreCase);
 
 		var materialCache = new Dictionary<int, Material>();
-		var st = new SurfaceTool();
 		var importerMesh = new ImporterMesh();
 		bool anySurface = false;
 
 		foreach (var flverMesh in flver.Meshes)
 		{
-			st.Begin(Mesh.PrimitiveType.Triangles);
 			var material = GetOrBuildMaterial(flverMesh.MaterialIndex, flver, texturesByName, materialCache, flverPath);
 
 			// FLVER's coordinate convention is the mirror image of Godot's: confirmed via bind-pose
@@ -102,34 +100,64 @@ public partial class FlverSceneImporter : EditorSceneFormatImporter
 			// carry one UV channel, confirmed on real water meshes game-wide) would wrongly
 			// try to read a nonexistent v.UVs[1].
 			bool needsUV2 = material is ShaderMaterial sm && sm.Shader == _blendShader;
-			foreach (var v in flverMesh.Vertices)
+
+			// Built as plain C# arrays rather than SurfaceTool.AddVertex/SetNormal/SetUV/.../per
+			// vertex: each of those is a separate Godot-engine call, and with meshes running into
+			// the tens of thousands of vertices across ~3400 mounted FLVERs that overhead adds up
+			// across a bulk reimport. Filling native arrays first and handing the whole buffer to
+			// the engine in one SurfaceTool.CreateFromArrays() call keeps the same per-vertex math
+			// but cuts the per-vertex engine-call count to zero.
+			var vertices = flverMesh.Vertices;
+			int vertCount = vertices.Count;
+			var positions = new Vector3[vertCount];
+			var normals = new Vector3[vertCount];
+			var colors = new Color[vertCount];
+			var uvs = new Vector2[vertCount];
+			var uv2s = needsUV2 ? new Vector2[vertCount] : null;
+			for (int i = 0; i < vertCount; i++)
 			{
-				st.SetNormal(new Vector3(-v.Normals[0].X, v.Normals[0].Y, v.Normals[0].Z));
+				var v = vertices[i];
+				positions[i] = new Vector3(-v.Position.X, v.Position.Y, v.Position.Z);
+				normals[i] = new Vector3(-v.Normals[0].X, v.Normals[0].Y, v.Normals[0].Z);
 				// Vertex color is FLVER's blend-weight channel (SoulsFormats' own doc comment:
 				// "data used for blending, alpha, etc.") - harmless to set unconditionally since
 				// StandardMaterial3D ignores vertex color unless VertexColorUseAsAlbedo is on.
 				var c = v.Colors[0];
-				st.SetColor(new Color(c.R, c.G, c.B, c.A));
+				colors[i] = new Color(c.R, c.G, c.B, c.A);
 				// No V-flip here (unlike Program.cs's OBJ output): that flip compensates for
 				// Wavefront OBJ's V convention, but Image.CreateFromData uses the same top-down
 				// row order as the raw decoded texture, so FLVER's raw V is already correct.
-				st.SetUV(new Vector2(v.UVs[0].X, v.UVs[0].Y));
+				uvs[i] = new Vector2(v.UVs[0].X, v.UVs[0].Y);
 				if (needsUV2)
-					st.SetUV2(new Vector2(v.UVs[1].X, v.UVs[1].Y));
-				st.AddVertex(new Vector3(-v.Position.X, v.Position.Y, v.Position.Z));
+					uv2s[i] = new Vector2(v.UVs[1].X, v.UVs[1].Y);
 			}
 
 			// Winding must be swapped here even though it wasn't for the OBJ path: mirroring the
 			// X axis above flips the apparent winding of every triangle, turning what used to
 			// coincidentally match Godot's clockwise-front convention into the wrong direction.
 			var tris = flverMesh.Triangulate(flver.Header.Version, false, true);
+			var indices = new int[tris.Count];
 			for (int i = 0; i < tris.Count; i += 3)
 			{
-				st.AddIndex(tris[i]);
-				st.AddIndex(tris[i + 2]);
-				st.AddIndex(tris[i + 1]);
+				indices[i] = tris[i];
+				indices[i + 1] = tris[i + 2];
+				indices[i + 2] = tris[i + 1];
 			}
 
+			var arrays = new Godot.Collections.Array();
+			arrays.Resize((int)Mesh.ArrayType.Max);
+			arrays[(int)Mesh.ArrayType.Vertex] = positions;
+			arrays[(int)Mesh.ArrayType.Normal] = normals;
+			arrays[(int)Mesh.ArrayType.Color] = colors;
+			arrays[(int)Mesh.ArrayType.TexUV] = uvs;
+			if (needsUV2)
+				arrays[(int)Mesh.ArrayType.TexUV2] = uv2s;
+			arrays[(int)Mesh.ArrayType.Index] = indices;
+
+			// GenerateTangents() still needs a SurfaceTool - CreateFromArrays() just loads the
+			// prebuilt arrays into it instead of the array being built via per-vertex calls.
+			var st = new SurfaceTool();
+			st.CreateFromArrays(arrays);
 			st.GenerateTangents();
 			// The scene-import pipeline (LOD/shadow mesh generation, mesh compression) only
 			// operates on the import-time ImporterMesh/ImporterMeshInstance3D representation -
