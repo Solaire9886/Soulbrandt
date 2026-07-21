@@ -7,12 +7,12 @@ file covers where it's going.
 ## The mission
 
 Soulbrandt is ultimately a **full recreation of Demon's Souls (2009, PS3) on a modern
-engine (Godot)**, in the same spirit as Dusklight (Twilight Princess) or Daggerfall
-Unity: the project itself will **never contain any proprietary FromSoftware code or
-assets**. Everything playable comes from the user's own legally-owned copy of
-the game, read at runtime. This isn't a launch-time legal footnote — it's a constraint
-that should shape design decisions throughout both phases below. If a feature only works
-by bundling or redistributing original assets/data, it's the wrong design.
+engine (Godot)**, in the spirit of asset-required fan recreations like Dusklight (Twilight
+Princess) or Daggerfall Unity: the project itself will **never contain any proprietary
+FromSoftware code or assets**. Everything playable comes from the user's own legally-owned
+copy of the game, read at runtime. This isn't a launch-time legal footnote — it's a
+constraint that should shape design decisions throughout both phases below. If a feature
+only works by bundling or redistributing original assets/data, it's the wrong design.
 
 ## Phase 1 — Asset importer bridge (current focus)
 

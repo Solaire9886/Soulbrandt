@@ -12,7 +12,9 @@ original code that reads a format; you provide your own copy of the game.
 ## Disclaimer
 
 - This project is not affiliated with, endorsed by, or connected to Sony Interactive
-  Entertainment, FromSoftware, Bandai Namco, or any other rights holder.
+  Entertainment (Japan publisher, current worldwide publisher of the 2020 PS5 remake, and
+  owner of the Demon's Souls IP), FromSoftware (developer), Atlus (original North American
+  publisher), Bandai Namco (original PAL-region publisher), or any other rights holder.
 - This project does not condone or support piracy in any form. It does not distribute,
   host, or link to game assets, ROMs, ISOs, or copyrighted files of any kind, and never
   will.
@@ -22,8 +24,11 @@ original code that reads a format; you provide your own copy of the game.
   copy of your own game is entirely your own responsibility and outside this project's scope.
 - Using this software requires you to own a legitimate dumped copy of Demon's Souls.
   No extraction guides, decryption keys, or pre-extracted files are provided here.
-- This is an independent reverse-engineering effort undertaken for interoperability and
-  preservation purposes, provided with no warranty of any kind.
+- Dumping your own copy is subject to your own country's software-copying and
+  DRM-circumvention laws, which vary by jurisdiction. Proceeding is entirely your own
+  discretion; this project and its contributors are not responsible for your actions.
+- This is an independent reverse-engineering effort undertaken for preservation and
+  educational purposes, provided with no warranty of any kind.
 
 ## What works today
 
