@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using Godot;
 using SoulsFormats;
 
@@ -11,32 +12,19 @@ namespace Archstone;
 // ImageTexture objects, bypassing the OBJ/MTL/DDS relay in desflver_test entirely.
 public partial class FlverSceneImporter : EditorSceneFormatImporter
 {
-	// Merged name->texture lookup per shared texture-bucket folder (e.g. mounted/map/m03/),
-	// keyed by that folder's absolute path. Map pieces don't ship a co-located same-basename
-	// .tpf like chr/obj models do - their textures are split across many numbered .tpf files
-	// in a folder shared by the whole map area, so this is built once and reused across every
-	// piece FLVER in that area instead of re-reading ~dozens of MB per mesh.
-	// ConcurrentDictionary, not Dictionary: Godot's bulk reimport dispatches _ImportScene calls
-	// across multiple worker threads against this same importer instance, so this cache is
-	// genuinely shared/mutated concurrently - a plain Dictionary here silently loses entries
-	// under contention, which read as random per-piece missing textures.
-	private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Dictionary<string, TPF.Texture>> _areaTextureCache = new();
-
-	// Some map pieces reuse another asset category's own texture set directly - e.g.
-	// m4020b0.flver (a corpse pile in Boletarian Palace) has a material referencing
-	// "Model/chr/c2000/tex/c2000_body.tga", chr's own same-basename-tpf convention, not
-	// map's shared-area-bucket one. Confirmed via a game-wide scan this isn't a one-off:
-	// at least 4 real map files reuse a chr texture set this way, plus ~14 more reference
-	// obj/parts the same way (those still resolve to nothing today since obj/ and parts/
-	// haven't been unpacked from their .objbnd/.partsbnd archives into loose files the way
-	// chr/map already have - this cache just has nothing to find yet, not a code bug).
-	// Keyed by resolved absolute .tpf path, not by folder, since - unlike the area bucket -
-	// this is always exactly one tpf file, not a merge across many.
-	private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Dictionary<string, TPF.Texture>> _foreignCategoryTextureCache = new();
+	// Every texture is identified purely by its base filename (case-insensitive), so every
+	// resolution rule in ResolveTexture below ultimately reduces to the same question: does
+	// this directory's merged *.tpf contents have a texture with this name. One cache for all
+	// of them, keyed by the resolved absolute directory. ConcurrentDictionary, not Dictionary:
+	// Godot's bulk reimport dispatches _ImportScene calls across multiple worker threads
+	// against this same importer instance, so this cache is genuinely shared/mutated
+	// concurrently - a plain Dictionary here silently loses entries under contention, which
+	// read as random per-piece missing textures.
+	private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Dictionary<string, TPF.Texture>> _dirTextureCache = new();
 
 	private readonly string _mountedRoot = ProjectSettings.GlobalizePath("res://mounted");
 
-	// Loaded once per importer instance (mirrors _areaTextureCache's one-time-init-is-
+	// Loaded once per importer instance (mirrors _dirTextureCache's one-time-init-is-
 	// thread-safe pattern) rather than lazily, since the bulk reimport calls _ImportScene
 	// across multiple threads against this same instance.
 	private readonly Shader _blendShader = GD.Load<Shader>("res://addons/archstone/terrain_blend.gdshader");
@@ -69,20 +57,13 @@ public partial class FlverSceneImporter : EditorSceneFormatImporter
 		string flverPath = ProjectSettings.GlobalizePath(path);
 		var flver = FLVER0.Read(flverPath);
 
-		string tpfPath = System.IO.Path.ChangeExtension(flverPath, ".tpf");
-		// Case-insensitive: material texture references don't always match the TPF entry's
-		// own casing (e.g. "m03_01_wall_cliff_00" referencing "m03_01_Wall_Cliff_00").
-		var texturesByName = System.IO.File.Exists(tpfPath)
-			? TPF.Read(tpfPath).Textures.ToDictionary(t => t.Name, StringComparer.OrdinalIgnoreCase)
-			: new Dictionary<string, TPF.Texture>(StringComparer.OrdinalIgnoreCase);
-
 		var materialCache = new Dictionary<int, Material>();
 		var importerMesh = new ImporterMesh();
 		bool anySurface = false;
 
 		foreach (var flverMesh in flver.Meshes)
 		{
-			var material = GetOrBuildMaterial(flverMesh.MaterialIndex, flver, texturesByName, materialCache, flverPath);
+			var material = GetOrBuildMaterial(flverMesh.MaterialIndex, flver, materialCache, flverPath);
 
 			// FLVER's coordinate convention is the mirror image of Godot's: confirmed via bind-pose
 			// FK on c0000/c9990's skeleton (L_Hand/R_Shield/etc. bones land on the opposite X side
@@ -179,11 +160,12 @@ public partial class FlverSceneImporter : EditorSceneFormatImporter
 	}
 
 	private Material GetOrBuildMaterial(int materialIndex, FLVER0 flver,
-		Dictionary<string, TPF.Texture> texturesByName, Dictionary<int, Material> cache, string flverPath)
+		Dictionary<int, Material> cache, string flverPath)
 	{
 		if (cache.TryGetValue(materialIndex, out var cached)) return cached;
 
 		var flverMaterial = flver.Materials[materialIndex];
+		InferMissingParamNames(flverMaterial);
 
 		// Water surfaces (DS_Water_Env MTD family: reflective/refractive, no diffuse texture
 		// at all, just g_Bumpmap + g_Envmap). Gated on g_Envmap's presence - confirmed unique
@@ -209,75 +191,195 @@ public partial class FlverSceneImporter : EditorSceneFormatImporter
 			&& flverMaterial.Textures.Any(t => t.ParamName == "g_Diffuse_2");
 
 		Material mat = isWater
-			? BuildWaterMaterial(flverMaterial, texturesByName, flverPath)
+			? BuildWaterMaterial(flverMaterial, flverPath)
 			: isBlend
-				? BuildBlendMaterial(flverMaterial, texturesByName, flverPath)
-				: BuildStandardMaterial(flverMaterial, texturesByName, flverPath);
+				? BuildBlendMaterial(flverMaterial, flverPath)
+				: BuildStandardMaterial(flverMaterial, flverPath);
 
 		cache[materialIndex] = mat;
 		return mat;
 	}
 
-	private ImageTexture? ResolveTexture(FLVER0.Material flverMaterial, string paramName,
-		Dictionary<string, TPF.Texture> texturesByName, string flverPath)
+	// A texture slot's type string ("g_Diffuse" etc) is a separate optional field in FLVER0's
+	// raw format (SoulsFormats leaves ParamName null when the underlying typeOffset is 0),
+	// and some materials never got one written at all - confirmed on 44 real mounted files
+	// across every category, not just obscure debug content: it also affects the soul-form
+	// "Ghost"/Wanderer phantom template (c9983, c9981) that dresses invaders/phantoms in
+	// their equipped gear. Every other texture-identification signal in this file (isWater,
+	// isBlend, ResolveTexture's own paramName match) depends on ParamName being set, so this
+	// has to run first, before any of that. There's no name to match against, but the MTD's
+	// own bracket tag (e.g. "[DifSpcBmp_Skin]") reliably lists which texture slots the
+	// material has and in what order - confirmed positionally 100% (83/83 real affected
+	// materials, spanning map/chr/obj/parts) against the same Dif/Spc/Bmp/Lit convention this
+	// file already trusts elsewhere for blend/transparency gating. Mutates the parsed Texture
+	// objects in place (ParamName has a public setter) so everything downstream keeps working
+	// unchanged.
+	private static readonly (string Token, string ParamName)[] TextureSlotTokens =
+	{
+		("Dif", "g_Diffuse"), ("Spc", "g_Specular"), ("Bmp", "g_Bumpmap"), ("Lit", "g_Lightmap"),
+		("Dcl", "g_Diffuse"), // sky/decal materials (DS_map_sky[Dcl].mtd) - a single backdrop texture
+	};
+
+	private static void InferMissingParamNames(FLVER0.Material mat)
+	{
+		var untyped = mat.Textures.Where(t => string.IsNullOrEmpty(t.ParamName)).ToList();
+		if (untyped.Count == 0) return;
+
+		var bracket = Regex.Match(mat.MTD, @"\[([^\]]*)\]");
+		string tag = bracket.Success ? bracket.Groups[1].Value : mat.MTD;
+
+		int slot = 0;
+		foreach (var (token, paramName) in TextureSlotTokens)
+		{
+			if (slot >= untyped.Count) break;
+			if (tag.Contains(token))
+				untyped[slot++].ParamName = paramName;
+		}
+	}
+
+	// Every rule below answers the same question - "which directory might have a *.tpf
+	// containing this texture name" - tried in order of how much we trust it, cheapest/most
+	// trustworthy first. Confirmed via real data, not guessed:
+	//  1. the model's own real shipped container (flat co-located tpf for chr, sibling tex/
+	//     folder for obj/parts) - always correct when present, since it's exactly what got
+	//     extracted for this specific model.
+	//  2. the directory the texture's own reference path names - correct for map pieces and
+	//     genuine cross-category reuse (e.g. a map corpse-pile FLVER pulling a chr texture
+	//     set), but the reference path's category segment is dev-tool metadata, not something
+	//     the game actually re-validates at runtime, so it's sometimes stale or just wrong.
+	//  3. another texture slot on the *same material* that does correctly point into a map
+	//     area - confirmed on Demon's Souls' six Nexus archstones (o1000-o1050): all six
+	//     share one map-area (m01) body texture but only their g_Lightmap ref is honestly
+	//     labeled, the g_Diffuse/Specular/Bumpmap refs are all copy-pasted from the o1000
+	//     template and never updated.
+	//  4. a map-area prefix baked into the texture's own filename (e.g. "m03_wall_oi2"),
+	//     tried even when every ref on the material lies about its own category - confirmed
+	//     on o3120/o3129 (Boletaria wall pieces), where even the lightmap ref is mislabeled
+	//     "obj/o3120" but every texture name still honestly starts "m03_".
+	// Together these resolve ~90% of the obj/parts texture refs that don't already succeed
+	// via rule 1 or 2 (measured against every mounted obj/parts material).
+	private IEnumerable<string?> CandidateDirs(FLVER0.Material mat, FLVER0.Texture texRef, string flverPath)
+	{
+		yield return OwnModelDir(flverPath);
+		yield return RefPathDir(texRef.Path);
+		yield return SiblingMapAreaDir(mat, texRef);
+		yield return MapPrefixDir(texRef.Path);
+	}
+
+	private ImageTexture? ResolveTexture(FLVER0.Material flverMaterial, string paramName, string flverPath)
 	{
 		var texRef = flverMaterial.Textures.FirstOrDefault(t => t.ParamName == paramName);
-		if (texRef == null) return null;
-		var refPath = texRef.Path.Replace('\\', '/');
-		var key = System.IO.Path.GetFileNameWithoutExtension(refPath);
+		if (texRef == null || string.IsNullOrEmpty(texRef.Path)) return null;
+		var key = System.IO.Path.GetFileNameWithoutExtension(texRef.Path.Replace('\\', '/'));
 
-		if (!texturesByName.TryGetValue(key, out var tpfTex) && !GetAreaTextures(refPath, flverPath).TryGetValue(key, out tpfTex))
-			GetForeignCategoryTextures(refPath).TryGetValue(key, out tpfTex);
+		foreach (var dir in CandidateDirs(flverMaterial, texRef, flverPath))
+			if (GetMergedTextures(dir).TryGetValue(key, out var tpfTex))
+				return DecodeTexture(tpfTex);
 
-		return tpfTex != null ? DecodeTexture(tpfTex) : null;
+		return null;
+	}
+
+	// The model's own real container: a flat co-located tpf for chr (mounted/chr/c2000/ holds
+	// both c2000.flver and c2000.tpf, so the flver's own directory already has everything),
+	// or the sibling "tex" folder for obj/parts, which instead split the flver into its own
+	// "sib" folder with "tex" as a sibling (mounted/obj/o0211/sib/o0211.flver +
+	// mounted/obj/o0211/tex/o0211.tpf) - confirmed via a directory scan not an edge case,
+	// every one of the 777 mounted obj/ and 309 mounted parts/ models uses this split.
+	private static string OwnModelDir(string flverPath)
+	{
+		string dir = System.IO.Path.GetDirectoryName(flverPath)!;
+		return string.Equals(System.IO.Path.GetFileName(dir), "sib", StringComparison.OrdinalIgnoreCase)
+			? System.IO.Path.Combine(System.IO.Path.GetDirectoryName(dir)!, "tex")
+			: dir;
 	}
 
 	// Resolves a reference like "Model/chr/c2000/tex/c2000_body.tga" straight to that
-	// model's own texture set, for the case where a FLVER in one asset category (here always
-	// "map") reuses another category's texture set wholesale rather than shipping/sharing its
-	// own. The real on-disk container layout is not uniform across categories - confirmed via
-	// real extraction (AssetExtractor.cs), not guessed: chr's chrbnd entries flatten the tpf
-	// straight into the model folder (mounted/chr/c2000/c2000.tpf, no "tex" folder at all),
-	// while obj/parts' containers keep a real "tex" subfolder matching the reference path
-	// literally (mounted/parts/Weapon/WP_A_1503/tex/WP_A_1503.tpf). Try the nested-tex layout
-	// first since it matches the reference path as-is, then fall back to the flattened one.
-	// Merge every *.tpf found there rather than opening one guessed-basename file: a folder
-	// can hold more than one real tpf (e.g. WP_A_1503.tpf and a separate WP_A_1503_L.tpf
-	// variant sitting side by side, confirmed on real weapon data - the entry a reference
-	// actually needs isn't always in the tpf whose name matches the containing folder). Same
-	// merge-everything-in-the-folder pattern BuildAreaTextures already uses for the map-area
-	// bucket case below.
-	private Dictionary<string, TPF.Texture> GetForeignCategoryTextures(string textureRefPath)
+	// model's own texture set. The real on-disk container layout is not uniform across
+	// categories - confirmed via real extraction (AssetExtractor.cs), not guessed: chr's
+	// chrbnd entries flatten the tpf straight into the model folder (mounted/chr/c2000/
+	// c2000.tpf, no "tex" folder at all), while obj/parts' containers keep a real "tex"
+	// subfolder matching the reference path literally (mounted/parts/Weapon/WP_A_1503/tex/
+	// WP_A_1503.tpf). Try the nested-tex layout first since it matches the reference path
+	// as-is, then fall back to the flattened one.
+	private string? RefPathDir(string textureRefPath)
 	{
-		var segs = textureRefPath.Split('/');
+		var segs = textureRefPath.Replace('\\', '/').Split('/');
 		int modelIdx = Array.FindIndex(segs, s => s.Equals("Model", StringComparison.OrdinalIgnoreCase));
 		int texIdx = Array.LastIndexOf(segs, "tex");
-		if (modelIdx < 0 || texIdx <= modelIdx + 1) return _emptyTextures;
+		if (modelIdx < 0 || texIdx <= modelIdx + 1) return null;
 
 		string subDir = string.Join('/', segs[(modelIdx + 1)..texIdx]);
 		string nestedDir = System.IO.Path.Combine(_mountedRoot, subDir, "tex");
 		string flatDir = System.IO.Path.Combine(_mountedRoot, subDir);
-		string dir = System.IO.Directory.Exists(nestedDir) ? nestedDir : flatDir;
-
-		return _foreignCategoryTextureCache.GetOrAdd(dir, static d =>
-		{
-			var textures = new Dictionary<string, TPF.Texture>(StringComparer.OrdinalIgnoreCase);
-			if (System.IO.Directory.Exists(d))
-				foreach (var tpfFile in System.IO.Directory.GetFiles(d, "*.tpf"))
-					foreach (var tex in TPF.Read(tpfFile).Textures)
-						textures.TryAdd(tex.Name, tex);
-			return textures;
-		});
+		return System.IO.Directory.Exists(nestedDir) ? nestedDir : flatDir;
 	}
 
-	private StandardMaterial3D BuildStandardMaterial(FLVER0.Material flverMaterial,
-		Dictionary<string, TPF.Texture> texturesByName, string flverPath)
+	// Any other texture slot on this same material whose own reference path names a map
+	// area - see CandidateDirs' doc comment for why (Nexus archstones' shared body texture).
+	private string? SiblingMapAreaDir(FLVER0.Material mat, FLVER0.Texture exclude)
+	{
+		string mapRoot = System.IO.Path.Combine(_mountedRoot, "map");
+		foreach (var t in mat.Textures)
+		{
+			if (t == exclude || string.IsNullOrEmpty(t.Path)) continue;
+			var dir = RefPathDir(t.Path);
+			if (dir != null && dir.StartsWith(mapRoot, StringComparison.OrdinalIgnoreCase))
+				return dir;
+		}
+		return null;
+	}
+
+	// Map textures are named like "m03_01_Wall_Cliff_00" - a leading map-area prefix baked
+	// into the filename itself, independent of whatever the reference path's category claims
+	// (see CandidateDirs' doc comment for the o3120/o3129 case this covers).
+	private static readonly Regex MapPrefixPattern = new(@"^(m\d\d)_", RegexOptions.IgnoreCase);
+
+	private string? MapPrefixDir(string textureRefPath)
+	{
+		var key = System.IO.Path.GetFileNameWithoutExtension(textureRefPath.Replace('\\', '/'));
+		var m = MapPrefixPattern.Match(key);
+		return m.Success ? System.IO.Path.Combine(_mountedRoot, "map", m.Groups[1].Value.ToLowerInvariant()) : null;
+	}
+
+	private Dictionary<string, TPF.Texture> GetMergedTextures(string? dir) =>
+		dir == null ? _emptyTextures : _dirTextureCache.GetOrAdd(dir, LoadDirTextures);
+
+	// Merges every *.tpf found in a directory rather than opening one guessed-basename file:
+	// a folder can hold more than one real tpf (e.g. WP_A_1503.tpf and a separate
+	// WP_A_1503_L.tpf variant sitting side by side, confirmed on real weapon data - the
+	// entry a reference actually needs isn't always in the tpf whose name matches the
+	// containing folder), and map-area buckets are always many numbered tpfs by design.
+	// Per-file try/catch: confirmed 3 real zero-byte .tpf across the mounted corpus (o3104,
+	// o0050, o7999 - a genuine extraction artifact, not a code bug), and this is the first
+	// code path that ever actually opens an obj/parts model's own tpf, so it's the first to
+	// hit them. Reading files pulled from the user's own game dump is a real trust boundary -
+	// one bad file must not abort an unrelated model's entire import.
+	private static Dictionary<string, TPF.Texture> LoadDirTextures(string dir)
+	{
+		var textures = new Dictionary<string, TPF.Texture>(StringComparer.OrdinalIgnoreCase);
+		if (System.IO.Directory.Exists(dir))
+			foreach (var tpfFile in System.IO.Directory.GetFiles(dir, "*.tpf"))
+			{
+				TPF tpf;
+				try { tpf = TPF.Read(tpfFile); }
+				catch (Exception e)
+				{
+					GD.PushWarning($"Skipping unreadable tpf '{tpfFile}': {e.Message}");
+					continue;
+				}
+				foreach (var tex in tpf.Textures)
+					textures.TryAdd(tex.Name, tex);
+			}
+		return textures;
+	}
+
+	private StandardMaterial3D BuildStandardMaterial(FLVER0.Material flverMaterial, string flverPath)
 	{
 		var mat = new StandardMaterial3D();
 
 		void Assign(string paramName, Action<ImageTexture> assign)
 		{
-			var tex = ResolveTexture(flverMaterial, paramName, texturesByName, flverPath);
+			var tex = ResolveTexture(flverMaterial, paramName, flverPath);
 			if (tex != null) assign(tex);
 		}
 
@@ -309,14 +411,13 @@ public partial class FlverSceneImporter : EditorSceneFormatImporter
 
 	// Blend materials' own MTD names (e.g. "M_4Stone[DSB][ML].mtd") never overlap with the
 	// _Edge/_Alp/_Add tags above - confirmed always opaque, so no transparency handling here.
-	private ShaderMaterial BuildBlendMaterial(FLVER0.Material flverMaterial,
-		Dictionary<string, TPF.Texture> texturesByName, string flverPath)
+	private ShaderMaterial BuildBlendMaterial(FLVER0.Material flverMaterial, string flverPath)
 	{
 		var mat = new ShaderMaterial { Shader = _blendShader };
 
 		void Assign(string paramName, string uniformName)
 		{
-			var tex = ResolveTexture(flverMaterial, paramName, texturesByName, flverPath);
+			var tex = ResolveTexture(flverMaterial, paramName, flverPath);
 			if (tex != null) mat.SetShaderParameter(uniformName, tex);
 		}
 
@@ -339,14 +440,13 @@ public partial class FlverSceneImporter : EditorSceneFormatImporter
 	// bump layer, water tint, Fresnel curve) has no equivalent anywhere in FLVER0's own
 	// material data - it only exists in the real .mtd shader definition, so this is the
 	// one material path that reads one via _mtdIndex instead of just the MTD path string.
-	private ShaderMaterial BuildWaterMaterial(FLVER0.Material flverMaterial,
-		Dictionary<string, TPF.Texture> texturesByName, string flverPath)
+	private ShaderMaterial BuildWaterMaterial(FLVER0.Material flverMaterial, string flverPath)
 	{
 		var mat = new ShaderMaterial { Shader = _waterShader };
 
 		void Assign(string paramName, string uniformName)
 		{
-			var tex = ResolveTexture(flverMaterial, paramName, texturesByName, flverPath);
+			var tex = ResolveTexture(flverMaterial, paramName, flverPath);
 			if (tex != null) mat.SetShaderParameter(uniformName, tex);
 		}
 		Assign("g_Bumpmap", "bumpmap");
@@ -424,37 +524,6 @@ public partial class FlverSceneImporter : EditorSceneFormatImporter
 	{
 		var p = mtd.Params.FirstOrDefault(x => x.Name == name);
 		return p?.Value is float[] v && v.Length >= 3 ? new Color(v[0], v[1], v[2]) : fallback;
-	}
-
-	// Map textures are named like ".../Model/map/m03/tex/m03_01_Wall_Cliff_00.tga" - the
-	// segment right before "tex" (here "m03") is a folder shared by the whole map area,
-	// sitting as a sibling of the piece's own containing folder
-	// (mounted/map/m03_01_00_00/piece.flver -> mounted/map/m03/), holding many numbered .tpf
-	// files that together cover every texture used across that area.
-	private Dictionary<string, TPF.Texture> GetAreaTextures(string textureRefPath, string flverPath)
-	{
-		var segments = textureRefPath.Split('/');
-		int texIndex = Array.LastIndexOf(segments, "tex");
-		if (texIndex < 1) return _emptyTextures;
-		string area = segments[texIndex - 1];
-
-		string? typeDir = System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(flverPath));
-		if (typeDir == null) return _emptyTextures;
-		string areaDir = System.IO.Path.Combine(typeDir, area);
-
-		return _areaTextureCache.GetOrAdd(areaDir, BuildAreaTextures);
-	}
-
-	private static Dictionary<string, TPF.Texture> BuildAreaTextures(string areaDir)
-	{
-		var merged = new Dictionary<string, TPF.Texture>(StringComparer.OrdinalIgnoreCase);
-		if (System.IO.Directory.Exists(areaDir))
-		{
-			foreach (var tpfFile in System.IO.Directory.GetFiles(areaDir, "*.tpf"))
-				foreach (var tex in TPF.Read(tpfFile).Textures)
-					merged.TryAdd(tex.Name, tex);
-		}
-		return merged;
 	}
 
 	private static readonly Dictionary<string, TPF.Texture> _emptyTextures = new();
