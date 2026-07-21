@@ -54,7 +54,13 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
 4. **Whatever else turns out to be needed for a walkable level** — collision/navmesh
    data, lighting/GI data, sound, and any other formats a real level depends on haven't
    been scoped at all yet. Expect this list to grow as Phase 1 continues; don't treat it
-   as complete.
+   as complete. One concrete addition found while investigating unrelated `obj/` texture
+   questions: **a Havok-driven destructible-debris system** (`map/breakobj/*.breakobj`,
+   an undocumented FromSoft-specific format, magic header `OBJB`) that a cluster of
+   dummy-only `obj/` FLVERs (e.g. `o6511`-`o6602`) appears to depend on for their actual
+   visible geometry at runtime — see CLAUDE.md's "Known deferred work" and context.md's
+   "Destructible-prop debris cluster" entry for the full investigation. Not started, not
+   even confirmed yet beyond the working theory.
 5. **A future "map assembler"** — resolving which map-piece FLVERs actually belong in a
    given scene (not just "every loose file in the folder", see the "not every FLVER in a
    map folder is placed" finding in context.md), plus handling triggers/events/entity
