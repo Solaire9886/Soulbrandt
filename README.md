@@ -41,6 +41,10 @@ original code that reads a format; you provide your own copy of the game.
 See `CLAUDE.md` for the full architecture writeup, `PLAN.md` for the roadmap, and
 `context.md` for the development history behind the trickier decisions.
 
+## Contributing
+
+Want to help? See `CONTRIBUTING.md` for the contributor workflow.
+
 ## Requirements
 
 - Godot 4.7 (.NET/Mono build)
