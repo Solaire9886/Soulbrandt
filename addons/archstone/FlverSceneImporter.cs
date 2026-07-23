@@ -22,6 +22,19 @@ public partial class FlverSceneImporter : EditorSceneFormatImporter
 	// read as random per-piece missing textures.
 	private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Dictionary<string, TPF.Texture>> _dirTextureCache = new();
 
+	// DecodeTexture (Headerize -> Pfim DXT decompress -> BGRA/RGBA swap -> GenerateMipmaps) is
+	// real per-call CPU work, not just an engine-call/allocation cost like the vertex arrays
+	// above - and unlike _dirTextureCache (which only dedupes reading/parsing a *.tpf), nothing
+	// was deduping the decode itself. Shared textures are the norm here, not the edge case (a
+	// map-area bucket's ~19 tpfs are reused by every piece in that area, cross-category reuse
+	// like m4020b0 pulling c2000's own texture set, etc.), so the same DDS bytes were getting
+	// fully redecoded on every referencing material. Keyed by TPF.Texture reference identity,
+	// not name: SoulsFormatsNEXT's TPF.Texture has no Equals/GetHashCode override, so default
+	// reference equality applies, and GetMergedTextures already returns the same cached
+	// dictionary (and therefore the same TPF.Texture instances) for a given directory across
+	// calls - so the same texture reference reliably comes back on a repeat resolution.
+	private readonly System.Collections.Concurrent.ConcurrentDictionary<TPF.Texture, ImageTexture> _decodedTextureCache = new();
+
 	private readonly string _mountedRoot = ProjectSettings.GlobalizePath("res://mounted");
 
 	// Loaded once per importer instance (mirrors _dirTextureCache's one-time-init-is-
@@ -29,6 +42,12 @@ public partial class FlverSceneImporter : EditorSceneFormatImporter
 	// across multiple threads against this same instance.
 	private readonly Shader _blendShader = GD.Load<Shader>("res://addons/archstone/terrain_blend.gdshader");
 	private readonly Shader _waterShader = GD.Load<Shader>("res://addons/archstone/water.gdshader");
+	// Three variants rather than one runtime-switched shader: Godot's blend_mix/blend_add are
+	// compile-time render_mode keywords, not per-material properties like
+	// StandardMaterial3D.BlendMode was - see lightmap.gdshader's header comment.
+	private readonly Shader _lightmapShader = GD.Load<Shader>("res://addons/archstone/lightmap.gdshader");
+	private readonly Shader _lightmapAlphaShader = GD.Load<Shader>("res://addons/archstone/lightmap_alpha.gdshader");
+	private readonly Shader _lightmapAddShader = GD.Load<Shader>("res://addons/archstone/lightmap_add.gdshader");
 
 	// One-time index of every real .mtd file under mounted/mtd/ (extracted from mtd.mtdbnd.dcx
 	// by AssetExtractor.cs - not present when the rest of this importer's material logic
@@ -64,23 +83,30 @@ public partial class FlverSceneImporter : EditorSceneFormatImporter
 		foreach (var flverMesh in flver.Meshes)
 		{
 			var material = GetOrBuildMaterial(flverMesh.MaterialIndex, flver, materialCache, flverPath);
+			var (_, isBlend, hasLightmap) = ClassifyMaterial(flver.Materials[flverMesh.MaterialIndex]);
 
 			// FLVER's coordinate convention is the mirror image of Godot's: confirmed via bind-pose
 			// FK on c0000/c9990's skeleton (L_Hand/R_Shield/etc. bones land on the opposite X side
 			// from where their own baked mesh geometry sits) and independently via m03_01_00_00
 			// rendering as a literal mirror image of m03_00_00_00. Negate X on position and normal
 			// to undo it.
-			// Only blend materials (see GetOrBuildMaterial) need a second UV set - the terrain-
-			// blend shader samples diffuse2/normal2/specular2 at UV2. Gated on the material
-			// itself rather than "mesh has >=2 UV channels" since that's the exact condition
-			// the shader needs, and not every mesh in the game is confirmed to have a second
-			// UV channel at all (the importer never read past index 0 until now).
-			// water.gdshader is also a ShaderMaterial but, like the single-layer path, only
-			// ever needs one UV channel - so this checks the specific Shader resource rather
-			// than "is this a ShaderMaterial at all", or water meshes (which really do only
-			// carry one UV channel, confirmed on real water meshes game-wide) would wrongly
-			// try to read a nonexistent v.UVs[1].
-			bool needsUV2 = material is ShaderMaterial sm && sm.Shader == _blendShader;
+			// Blend materials always use UV1 for their second diffuse/normal/specular layer;
+			// non-blend materials with a real g_Lightmap use UV1 for the lightmap itself instead
+			// - confirmed via a corpus-wide survey (11646 materials, 7394 with a lightmap) that
+			// every lightmapped mesh has exactly one more UV channel than its non-lightmapped
+			// counterpart would, zero exceptions. Either way that's "this mesh needs a second UV
+			// channel." water.gdshader is also a ShaderMaterial but, like the plain single-layer
+			// path, only ever needs one UV channel - so this is recomputed from the FLVER
+			// material directly (ClassifyMaterial) rather than inferred from the built Material/
+			// Shader instance, which can't distinguish "blend without lightmap" from "blend with."
+			bool needsUV2 = isBlend || hasLightmap;
+			// Blend+lightmap meshes (865 of 912 real blend materials) have a genuine third UV
+			// channel - FLVER's UV2 - with nowhere else to go, since both of Godot's native UV
+			// slots are already spoken for by the two diffuse layers. Packed into
+			// Mesh.ArrayType.Custom0 below (raw floats, read back in terrain_blend.gdshader via
+			// CUSTOM0.rg) - this is the Custom0 plan CLAUDE.md's "Known deferred work" described
+			// before lightmap support existed at all.
+			bool needsLightmapCustom0 = isBlend && hasLightmap;
 
 			// Built as plain C# arrays rather than SurfaceTool.AddVertex/SetNormal/SetUV/.../per
 			// vertex: each of those is a separate Godot-engine call, and with meshes running into
@@ -95,28 +121,56 @@ public partial class FlverSceneImporter : EditorSceneFormatImporter
 			var colors = new Color[vertCount];
 			var uvs = new Vector2[vertCount];
 			var uv2s = needsUV2 ? new Vector2[vertCount] : null;
+			var custom0s = needsLightmapCustom0 ? new float[vertCount * 2] : null;
 			for (int i = 0; i < vertCount; i++)
 			{
 				var v = vertices[i];
 				positions[i] = new Vector3(-v.Position.X, v.Position.Y, v.Position.Z);
-				normals[i] = new Vector3(-v.Normals[0].X, v.Normals[0].Y, v.Normals[0].Z);
+				// Normals/Colors/UVs are each populated per-vertex only if the mesh's own
+				// FLVER0 BufferLayout actually has a member for that semantic - confirmed via
+				// SoulsFormatsNEXT's Vertex.Read: some meshes' layout genuinely omits Normal
+				// and/or UV entirely (m9999b0/m9900 across several map areas, o9996 in obj -
+				// all suspicious "reserved/debug ID"-looking names, plausibly collision-only or
+				// tool geometry never meant to render). Indexing [0] unconditionally is what
+				// threw ArgumentOutOfRangeException here before; a missing channel now falls
+				// back to a neutral default instead of taking the whole mesh's import down.
+				normals[i] = v.Normals.Count > 0
+					? new Vector3(-v.Normals[0].X, v.Normals[0].Y, v.Normals[0].Z)
+					: Vector3.Up;
 				// Vertex color is FLVER's blend-weight channel (SoulsFormats' own doc comment:
 				// "data used for blending, alpha, etc.") - harmless to set unconditionally since
 				// StandardMaterial3D ignores vertex color unless VertexColorUseAsAlbedo is on.
-				var c = v.Colors[0];
-				colors[i] = new Color(c.R, c.G, c.B, c.A);
+				colors[i] = v.Colors.Count > 0
+					? new Color(v.Colors[0].R, v.Colors[0].G, v.Colors[0].B, v.Colors[0].A)
+					: Colors.White;
 				// No V-flip here (unlike Program.cs's OBJ output): that flip compensates for
 				// Wavefront OBJ's V convention, but Image.CreateFromData uses the same top-down
 				// row order as the raw decoded texture, so FLVER's raw V is already correct.
-				uvs[i] = new Vector2(v.UVs[0].X, v.UVs[0].Y);
+				uvs[i] = v.UVs.Count > 0 ? new Vector2(v.UVs[0].X, v.UVs[0].Y) : Vector2.Zero;
 				if (needsUV2)
-					uv2s[i] = new Vector2(v.UVs[1].X, v.UVs[1].Y);
+					uv2s[i] = v.UVs.Count > 1 ? new Vector2(v.UVs[1].X, v.UVs[1].Y) : Vector2.Zero;
+				// Left at the C# array default (0,0) if this particular vertex's layout somehow
+				// lacks a third UV channel - same "missing channel -> neutral default" fallback
+				// used for normals/colors/UVs above, though the corpus survey found zero real
+				// instances of this for blend+lightmap meshes.
+				if (needsLightmapCustom0 && v.UVs.Count > 2)
+				{
+					custom0s[i * 2] = v.UVs[2].X;
+					custom0s[i * 2 + 1] = v.UVs[2].Y;
+				}
 			}
 
 			// Winding must be swapped here even though it wasn't for the OBJ path: mirroring the
 			// X axis above flips the apparent winding of every triangle, turning what used to
 			// coincidentally match Godot's clockwise-front convention into the wrong direction.
-			var tris = flverMesh.Triangulate(flver.Header.Version, false, true);
+			// doCheckFlip only applies to triangle-strip meshes at a strip-restart marker, where
+			// it averages the three vertices' own Normals against the computed face normal to
+			// decide whether to flip - meaningless (and, confirmed on o9996.flver, an
+			// ArgumentOutOfRangeException inside SoulsFormats.FLVER.Vertex.get_Normal at
+			// Mesh.Triangulate's Normal access) on a mesh whose BufferLayout has no Normal
+			// member at all. Only request it when this mesh's own vertices actually carry one.
+			bool canCheckFlip = vertCount > 0 && vertices[0].Normals.Count > 0;
+			var tris = flverMesh.Triangulate(flver.Header.Version, false, canCheckFlip);
 			var indices = new int[tris.Count];
 			for (int i = 0; i < tris.Count; i += 3)
 			{
@@ -133,6 +187,8 @@ public partial class FlverSceneImporter : EditorSceneFormatImporter
 			arrays[(int)Mesh.ArrayType.TexUV] = uvs;
 			if (needsUV2)
 				arrays[(int)Mesh.ArrayType.TexUV2] = uv2s;
+			if (needsLightmapCustom0)
+				arrays[(int)Mesh.ArrayType.Custom0] = custom0s;
 			arrays[(int)Mesh.ArrayType.Index] = indices;
 
 			// GenerateTangents() still needs a SurfaceTool - CreateFromArrays() just loads the
@@ -140,10 +196,17 @@ public partial class FlverSceneImporter : EditorSceneFormatImporter
 			var st = new SurfaceTool();
 			st.CreateFromArrays(arrays);
 			st.GenerateTangents();
+			// Custom0's component count (2 floats/vertex here, matching custom0s' packing above)
+			// isn't inferable the way Vertex/Normal/UV are, since ArrayCustomFormat also covers
+			// byte-packed layouts of the same nominal size - has to be spelled out explicitly or
+			// the lightmap UV silently fails to read back as CUSTOM0 in the shader.
+			ulong customArrayFormat = needsLightmapCustom0
+				? (ulong)Mesh.ArrayCustomFormat.RgFloat << (int)Mesh.ArrayFormat.FormatCustom0Shift
+				: 0;
 			// The scene-import pipeline (LOD/shadow mesh generation, mesh compression) only
 			// operates on the import-time ImporterMesh/ImporterMeshInstance3D representation -
 			// returning a runtime ArrayMesh/MeshInstance3D here gets silently dropped on save.
-			importerMesh.AddSurface(Mesh.PrimitiveType.Triangles, st.CommitToArrays(), material: material);
+			importerMesh.AddSurface(Mesh.PrimitiveType.Triangles, st.CommitToArrays(), material: material, flags: customArrayFormat);
 			anySurface = true;
 		}
 
@@ -167,11 +230,31 @@ public partial class FlverSceneImporter : EditorSceneFormatImporter
 		var flverMaterial = flver.Materials[materialIndex];
 		InferMissingParamNames(flverMaterial);
 
+		var (isWater, isBlend, hasLightmap) = ClassifyMaterial(flverMaterial);
+
+		Material mat = isWater
+			? BuildWaterMaterial(flverMaterial, flverPath)
+			: isBlend
+				? BuildBlendMaterial(flverMaterial, flverPath)
+				: hasLightmap
+					? BuildLightmapMaterial(flverMaterial, flverPath)
+					: BuildStandardMaterial(flverMaterial, flverPath);
+
+		cache[materialIndex] = mat;
+		return mat;
+	}
+
+	// Shared by GetOrBuildMaterial (to pick a material/shader family) and _ImportScene's
+	// per-mesh vertex loop (to know which extra UV/custom channels this mesh needs) - both
+	// need the exact same three-way classification, and computing it twice via ad hoc inline
+	// checks risked the two call sites silently drifting out of sync.
+	private static (bool IsWater, bool IsBlend, bool HasLightmap) ClassifyMaterial(FLVER0.Material mat)
+	{
 		// Water surfaces (DS_Water_Env MTD family: reflective/refractive, no diffuse texture
 		// at all, just g_Bumpmap + g_Envmap). Gated on g_Envmap's presence - confirmed unique
 		// to this family across all 8889 materials in the game (58/58 instances), so unlike
 		// the blend gate below this needs no filename heuristic at all.
-		bool isWater = flverMaterial.Textures.Any(t => t.ParamName == "g_Envmap");
+		bool isWater = mat.Textures.Any(t => t.ParamName == "g_Envmap");
 
 		// Map terrain ground-blend materials (grass/dirt/stone transitions): a second
 		// diffuse/bumpmap/specular set blended with the first via vertex color. Gated on the
@@ -187,17 +270,18 @@ public partial class FlverSceneImporter : EditorSceneFormatImporter
 		// "Cs_Ghost_Param_Wander.mtd") with no bracket tag at all - those must keep using the
 		// single-layer path below unchanged.
 		bool isBlend = !isWater
-			&& (flverMaterial.MTD.Contains("[M]") || flverMaterial.MTD.Contains("[ML]"))
-			&& flverMaterial.Textures.Any(t => t.ParamName == "g_Diffuse_2");
+			&& (mat.MTD.Contains("[M]") || mat.MTD.Contains("[ML]"))
+			&& mat.Textures.Any(t => t.ParamName == "g_Diffuse_2");
 
-		Material mat = isWater
-			? BuildWaterMaterial(flverMaterial, flverPath)
-			: isBlend
-				? BuildBlendMaterial(flverMaterial, flverPath)
-				: BuildStandardMaterial(flverMaterial, flverPath);
+		// A real baked-lighting texture, present on 7394/11646 mounted materials (63%).
+		// StandardMaterial3D has no independent-UV multiply slot for it, so non-blend
+		// materials with one route to BuildLightmapMaterial's shader family instead of
+		// BuildStandardMaterial; blend materials keep using BuildBlendMaterial, which now also
+		// samples this when present (see terrain_blend.gdshader). Never true alongside
+		// isWater - confirmed 0/58 water materials have a lightmap, via corpus survey.
+		bool hasLightmap = mat.Textures.Any(t => t.ParamName == "g_Lightmap");
 
-		cache[materialIndex] = mat;
-		return mat;
+		return (isWater, isBlend, hasLightmap);
 	}
 
 	// A texture slot's type string ("g_Diffuse" etc) is a separate optional field in FLVER0's
@@ -274,7 +358,7 @@ public partial class FlverSceneImporter : EditorSceneFormatImporter
 
 		foreach (var dir in CandidateDirs(flverMaterial, texRef, flverPath))
 			if (GetMergedTextures(dir).TryGetValue(key, out var tpfTex))
-				return DecodeTexture(tpfTex);
+				return _decodedTextureCache.GetOrAdd(tpfTex, DecodeTexture);
 
 		return null;
 	}
@@ -409,6 +493,46 @@ public partial class FlverSceneImporter : EditorSceneFormatImporter
 		return mat;
 	}
 
+	// Single-layer materials with a real g_Lightmap texture (the ~6529-material majority of
+	// hasLightmap materials, i.e. every one that isn't also a blend material - see
+	// ClassifyMaterial). StandardMaterial3D has no independent-UV multiply slot for it, so
+	// these route to a small custom shader family instead (see lightmap.gdshader's header for
+	// why there are three files, not one). Same "_Edge"/"_Alp"/"_Add" MTD convention as
+	// BuildStandardMaterial still applies and is unrelated to the lightmap itself - it just
+	// has to be expressed as shader/render_mode selection here instead of the
+	// Transparency/BlendMode properties BuildStandardMaterial sets directly.
+	private ShaderMaterial BuildLightmapMaterial(FLVER0.Material flverMaterial, string flverPath)
+	{
+		Shader shader = _lightmapShader;
+		float scissorThreshold = 0.0f;
+		if (flverMaterial.MTD.Contains("_Edge"))
+			scissorThreshold = 0.5f; // matches StandardMaterial3D's own AlphaScissor default.
+		else if (flverMaterial.MTD.Contains("_Alp"))
+			shader = _lightmapAlphaShader;
+		else if (flverMaterial.MTD.Contains("_Add"))
+			shader = _lightmapAddShader;
+
+		var mat = new ShaderMaterial { Shader = shader };
+
+		void Assign(string paramName, string uniformName)
+		{
+			var tex = ResolveTexture(flverMaterial, paramName, flverPath);
+			if (tex != null) mat.SetShaderParameter(uniformName, tex);
+		}
+
+		Assign("g_Diffuse", "diffuse");
+		Assign("g_Bumpmap", "normal_map");
+		Assign("g_Specular", "specular");
+		Assign("g_Lightmap", "lightmap");
+
+		// alpha_scissor_threshold only exists on lightmap.gdshader (see its header) - the
+		// _Alp/_Add variants always do real ALPHA blending, no scissor uniform to set.
+		if (shader == _lightmapShader)
+			mat.SetShaderParameter("alpha_scissor_threshold", scissorThreshold);
+
+		return mat;
+	}
+
 	// Blend materials' own MTD names (e.g. "M_4Stone[DSB][ML].mtd") never overlap with the
 	// _Edge/_Alp/_Add tags above - confirmed always opaque, so no transparency handling here.
 	private ShaderMaterial BuildBlendMaterial(FLVER0.Material flverMaterial, string flverPath)
@@ -427,6 +551,9 @@ public partial class FlverSceneImporter : EditorSceneFormatImporter
 		Assign("g_Bumpmap_2", "normal2");
 		Assign("g_Specular", "specular1");
 		Assign("g_Specular_2", "specular2");
+		// Only 865 of 912 real blend materials have one - the other 47 leave this unset,
+		// which is safe: terrain_blend.gdshader's lightmap uniform defaults to white/no-op.
+		Assign("g_Lightmap", "lightmap");
 
 		return mat;
 	}
