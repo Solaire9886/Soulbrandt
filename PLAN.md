@@ -23,8 +23,15 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
 
 **Done:**
 - Static mesh + material import for both character/object models and map geometry
-  (FLVER0 → `ImporterMesh`/`StandardMaterial3D`/`ImageTexture`, native
-  `EditorSceneFormatImporter`, no intermediate file formats).
+  (FLVER0 → `ArrayMesh`/`StandardMaterial3D`/`ImageTexture`, no intermediate file
+  formats). As of 2026-07-24, driven by a manual loader (`FlverModelBuilder.cs` +
+  `FlverLoader.cs`, triggered from the Archstone toolbar's "Load Model(s)..."/"Load
+  Folder..."), not a Godot `EditorSceneFormatImporter` — the res:// reimport pipeline
+  was dropped entirely after it turned out to be the source of a real hang/crash cycle
+  Godot itself gives plugins no way to control; see CLAUDE.md's "Architecture" section
+  and context.md's reimport-concurrency entry for the full story. This also means the
+  loader logic now has zero `EditorPlugin`/`EditorInterface` dependency, which is a real
+  (if partial) step toward item 1 below, not just an unrelated refactor.
 - Texture resolution for the chr/obj same-basename-TPF convention, the map
   shared-area-bucket convention, and cross-category reuse (a map piece using another
   category's texture set wholesale — see CLAUDE.md's "Texture resolution" section).
