@@ -8,31 +8,20 @@ using SoulsFormats;
 
 namespace Archstone;
 
-// Walks a raw, unmodified Demon's Souls extraction root and unpacks its .bnd/.dcx containers
-// directly via SoulsFormatsNEXT (DCX_EDGE + BND3, confirmed against real containers this game
-// actually ships - see context.md), writing loose files into the same res://mounted layout
-// FlverSceneImporter.cs already assumes. No external unpacker tool involved anywhere in this
-// workflow. No editor-only API anywhere in this class - it's called identically from
-// archstone.gd's dialog and from the headless extract_cli.gd script.
+// Walks a raw Demon's Souls extraction root and unpacks its .bnd/.dcx containers directly via
+// SoulsFormatsNEXT, writing loose files into res://mounted's layout. No editor-only API - called
+// identically from archstone.gd and the headless extract_cli.gd script.
 public partial class AssetExtractor : RefCounted
 {
-	// The only top-level source directories the importer actually reads today. Extraction
-	// intentionally never walks the raw root's movie/sound/msg/font/script/param/etc data -
-	// nothing consumes it, and unpacking it too would multiply first-run extraction time and
-	// disk usage for zero benefit today.
-	// ponytail: flat allowlist, extend when animation/collision import needs a new category -
-	// HKX/anibnd already live inside chr/, so skeleton import won't even need one.
+	// The only categories the importer actually reads - see CLAUDE.md.
+	// ponytail: flat allowlist, extend when animation/collision import needs a new category.
 	public static readonly string[] KnownCategories = { "chr", "map", "obj", "parts", "mtd" };
 
-	// Instance wrapper so GDScript (which can't reliably reach a static field across the
-	// C#/GDScript boundary on a load(...).new() instance) can still read this list without
-	// a second, separately-maintained copy of it in archstone.gd.
+	// Instance wrapper so GDScript can read this without a second copy in archstone.gd.
 	public string[] GetKnownCategories() => KnownCategories;
 
-	// categories: null/empty means "all of KnownCategories"; unknown names are ignored, not
-	// fatal. Runs on a background thread so the caller (editor UI or a headless script) is
-	// never blocked; onProgress/onComplete are marshaled back via CallDeferred, the standard
-	// safe way to reach the main thread from a background one in Godot.
+	// categories: null/empty means "all of KnownCategories". Runs on a background thread;
+	// onProgress/onComplete are marshaled back via CallDeferred.
 	public void ExtractAsync(string rawRoot, string outputRoot, string[] categories, Callable onProgress, Callable onComplete)
 	{
 		var selected = (categories == null || categories.Length == 0)
@@ -44,9 +33,7 @@ public partial class AssetExtractor : RefCounted
 
 	private void Run(string rawRoot, string outputRoot, string[] categories, Callable onProgress, Callable onComplete)
 	{
-		// A pre-existing symlink (an old `mounted` stopgap from before this class existed)
-		// would otherwise have every write transparently follow it into that old target
-		// instead of creating a real directory here.
+		// A pre-existing symlink (old mounted stopgap) would otherwise have writes follow it.
 		if (Directory.Exists(outputRoot) && File.GetAttributes(outputRoot).HasFlag(FileAttributes.ReparsePoint))
 			Directory.Delete(outputRoot);
 		Directory.CreateDirectory(outputRoot);
@@ -91,17 +78,14 @@ public partial class AssetExtractor : RefCounted
 		}
 		else if (BND4.IsRead(inner, out var bnd4))
 		{
-			// Not yet confirmed against a real Demon's Souls container (this game's binders
-			// have only ever been observed as BND3) - included since SoulsFormatsNEXT already
-			// ships it and the cost of handling it here is zero, but treat as unverified.
+			// Not yet confirmed against a real DeS container (only BND3 observed so far) -
+			// included since SoulsFormatsNEXT already ships it at zero extra cost.
 			foreach (var entry in bnd4.Files)
 				WriteEntry(entry.Name, entry.Bytes, sourcePath, outputRoot, ref extracted, ref skipped);
 		}
 		else if (!ReferenceEquals(raw, inner))
 		{
-			// A bare DCX-compressed single asset with no binder wrapper at all (e.g. a map
-			// piece's own .flver.dcx) - write the decompressed bytes at the source's own
-			// relative path, minus the trailing .dcx.
+			// Bare DCX-compressed single asset, no binder wrapper (e.g. a map piece's .flver.dcx).
 			string relative = Path.GetRelativePath(rawRoot, sourcePath);
 			if (relative.EndsWith(".dcx", StringComparison.OrdinalIgnoreCase))
 				relative = relative[..^4];
@@ -109,8 +93,7 @@ public partial class AssetExtractor : RefCounted
 		}
 		else
 		{
-			// Not a container, not DCX - already a plain loose file (e.g. an already-unpacked
-			// .mtd sitting next to the containers). Copy through as-is.
+			// Already a plain loose file - copy through as-is.
 			string relative = Path.GetRelativePath(rawRoot, sourcePath);
 			WriteIfStale(sourcePath, Path.Combine(outputRoot, relative), raw, ref extracted, ref skipped);
 		}
@@ -135,12 +118,9 @@ public partial class AssetExtractor : RefCounted
 		extracted++;
 	}
 
-	// Real BND entry names are full Windows paths, e.g.
-	// "N:\DemonsSoul\data\DVDROOT\chr\c2000\c2000.flver" - confirmed (not guessed) against a
-	// real c2000.chrbnd.dcx: dropping exactly one segment right after "data" (always
-	// "DVDROOT" in real entry names - a different embedded-path convention than the "Model"
-	// segment seen in FLVER material texture *references*, easy to conflate but confirmed
-	// distinct) and joining the rest lands every entry at its exact existing on-disk path.
+	// Real BND entry names are full Windows paths (e.g. "N:\...\data\DVDROOT\chr\c2000\c2000.flver")
+	// - dropping the segment right after "data" (always "DVDROOT") and joining the rest lands
+	// every entry at its exact existing on-disk path.
 	private static string ResolveEntryOutputPath(string entryName)
 	{
 		var segs = entryName.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);

@@ -16,10 +16,16 @@ theme_override_constants/icon_max_width = 32
 text = "Archstone
 "
 icon = ExtResource("1_qjsrx")
-item_count = 3
+item_count = 6
 popup/item_0/text = "Import"
 popup/item_0/id = 0
 popup/item_1/text = "Mount..."
 popup/item_1/id = 1
 popup/item_2/text = "Clear Mounted Assets..."
 popup/item_2/id = 2
+popup/item_3/text = "Load Model(s)..."
+popup/item_3/id = 3
+popup/item_4/text = "Load Folder..."
+popup/item_4/id = 4
+popup/item_5/text = "Reload Loaded Models"
+popup/item_5/id = 5

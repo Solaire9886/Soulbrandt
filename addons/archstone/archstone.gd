@@ -4,7 +4,6 @@ extends EditorPlugin
 const MOUNT_CONFIG_PATH := "user://archstone_mount.cfg"
 
 var import_button
-var flver_importer
 
 var _mount_dialog: EditorFileDialog
 var _import_scope_dialog: ConfirmationDialog
@@ -14,36 +13,35 @@ var _progress_dialog: AcceptDialog
 var _progress_bar: ProgressBar
 var _progress_label: Label
 var _message_dialog: AcceptDialog
+var _load_files_dialog: EditorFileDialog
+var _load_folder_dialog: EditorFileDialog
+var _loader
 
 
 func _enable_plugin() -> void:
-	# Add autoloads here.
 	pass
 
 
 func _disable_plugin() -> void:
-	# Remove autoloads here.
 	pass
 
 
 func _enter_tree() -> void:
-	# Initialization of the plugin goes here.
 	import_button = preload("res://addons/archstone/import.tscn").instantiate()
 
 	add_control_to_container(EditorPlugin.CONTAINER_TOOLBAR, import_button)
 	import_button.get_node("MenuButton").get_popup().id_pressed.connect(_on_menu_item_pressed)
 
-	flver_importer = load("res://addons/archstone/FlverSceneImporter.cs").new()
-	add_scene_format_importer_plugin(flver_importer)
+	# No EditorSceneFormatImporter for .flver anymore - see CLAUDE.md's Architecture section.
+	# One FlverLoader instance for the whole editor session so its cache persists across loads.
+	_loader = load("res://addons/archstone/FlverLoader.cs").new()
 
 
 func _exit_tree() -> void:
-	# Clean-up of the plugin goes here.
-	remove_scene_format_importer_plugin(flver_importer)
 	remove_control_from_container(EditorPlugin.CONTAINER_TOOLBAR, import_button)
 
 	import_button.free()
-	for dialog in [_mount_dialog, _import_scope_dialog, _category_dialog, _clear_confirm_dialog, _progress_dialog, _message_dialog]:
+	for dialog in [_mount_dialog, _import_scope_dialog, _category_dialog, _clear_confirm_dialog, _progress_dialog, _message_dialog, _load_files_dialog, _load_folder_dialog]:
 		if dialog:
 			dialog.queue_free()
 
@@ -55,6 +53,13 @@ func _on_menu_item_pressed(id: int) -> void:
 		_show_mount_dialog()
 	elif id == 2:
 		_show_clear_confirm_dialog()
+	elif id == 3:
+		_show_load_files_dialog()
+	elif id == 4:
+		_show_load_folder_dialog()
+	elif id == 5:
+		_loader.EvictAll()
+		_show_message("Cache cleared", "Every previously loaded model will rebuild from source next time it's loaded.")
 
 
 func _show_mount_dialog() -> void:
@@ -189,7 +194,7 @@ func _on_extract_complete(extracted: int, skipped: int, errors: String) -> void:
 		for line in errors.split("\n"):
 			if not line.is_empty():
 				push_error("Archstone mount: " + line)
-	EditorInterface.get_resource_filesystem().scan()
+	# Deliberately no EditorInterface.get_resource_filesystem().scan() call - see _enter_tree().
 
 
 func _show_clear_confirm_dialog() -> void:
@@ -204,7 +209,6 @@ func _show_clear_confirm_dialog() -> void:
 func _clear_mounted_assets() -> void:
 	if DirAccess.dir_exists_absolute("res://mounted"):
 		_delete_recursive("res://mounted")
-	EditorInterface.get_resource_filesystem().scan()
 	_show_message("Mounted assets cleared", "res://mounted has been deleted.")
 
 
@@ -224,6 +228,103 @@ func _delete_recursive(path: String) -> void:
 		entry = dir.get_next()
 	dir.list_dir_end()
 	DirAccess.remove_absolute(path)
+
+
+func _show_load_files_dialog() -> void:
+	_load_files_dialog = EditorFileDialog.new()
+	_load_files_dialog.title = "Select .flver model(s) to load"
+	_load_files_dialog.file_mode = EditorFileDialog.FILE_MODE_OPEN_FILES
+	_load_files_dialog.access = EditorFileDialog.ACCESS_FILESYSTEM
+	_load_files_dialog.add_filter("*.flver", "FLVER Models")
+
+	var mounted_dir := ProjectSettings.globalize_path("res://mounted")
+	if DirAccess.dir_exists_absolute(mounted_dir):
+		_load_files_dialog.current_dir = mounted_dir
+
+	_load_files_dialog.files_selected.connect(_on_files_selected)
+	EditorInterface.get_base_control().add_child(_load_files_dialog)
+	_load_files_dialog.popup_centered_ratio(0.7)
+
+
+func _show_load_folder_dialog() -> void:
+	_load_folder_dialog = EditorFileDialog.new()
+	_load_folder_dialog.title = "Select a folder - every .flver found under it (recursively) will be loaded"
+	_load_folder_dialog.file_mode = EditorFileDialog.FILE_MODE_OPEN_DIR
+	_load_folder_dialog.access = EditorFileDialog.ACCESS_FILESYSTEM
+
+	var mounted_dir := ProjectSettings.globalize_path("res://mounted")
+	if DirAccess.dir_exists_absolute(mounted_dir):
+		_load_folder_dialog.current_dir = mounted_dir
+
+	_load_folder_dialog.dir_selected.connect(_on_load_folder_selected)
+	EditorInterface.get_base_control().add_child(_load_folder_dialog)
+	_load_folder_dialog.popup_centered_ratio(0.7)
+
+
+func _on_files_selected(paths: PackedStringArray) -> void:
+	var res_paths: Array[String] = []
+	for path in paths:
+		res_paths.append(ProjectSettings.localize_path(path))
+	_load_models(res_paths)
+
+
+func _on_load_folder_selected(dir: String) -> void:
+	_load_models(_flver_files_recursive(dir))
+
+
+# Every .flver under a folder, recursively - lets "Load Folder..." grab a whole map area
+# (or an obj/parts model's sib/ subfolder) in one click.
+func _flver_files_recursive(dir_path: String) -> Array[String]:
+	var found: Array[String] = []
+	var dir := DirAccess.open(dir_path)
+	if not dir:
+		return found
+	dir.list_dir_begin()
+	var entry := dir.get_next()
+	while entry != "":
+		if not entry.begins_with("."):
+			var full_path := dir_path.path_join(entry)
+			if DirAccess.dir_exists_absolute(full_path):
+				found.append_array(_flver_files_recursive(full_path))
+			elif entry.get_extension().to_lower() == "flver":
+				found.append(ProjectSettings.localize_path(full_path))
+		entry = dir.get_next()
+	dir.list_dir_end()
+	return found
+
+
+func _load_models(res_paths: Array[String]) -> void:
+	if res_paths.is_empty():
+		_show_message("Nothing to load", "No .flver files were found in that selection.")
+		return
+
+	var target := _pick_load_target()
+	if not target:
+		_show_message("No scene open", "Open or create a scene first - loaded models are placed under the edited scene's root, or the currently selected scene-tree node.")
+		return
+
+	for path in res_paths:
+		var inst: Node3D = _loader.Instantiate(path)
+		target.add_child(inst)
+		_set_owner_recursive(inst, target.owner if target.owner else target)
+
+	_show_message("Models loaded", "Loaded %d model(s) under '%s'." % [res_paths.size(), target.name])
+
+
+# The first selected Node3D in the Scene dock, or the edited scene's own root.
+func _pick_load_target() -> Node3D:
+	for node in EditorInterface.get_selection().get_selected_nodes():
+		if node is Node3D:
+			return node
+	var root := EditorInterface.get_edited_scene_root()
+	return root if root is Node3D else null
+
+
+func _set_owner_recursive(node: Node, owner: Node) -> void:
+	if node != owner:
+		node.owner = owner
+	for child in node.get_children():
+		_set_owner_recursive(child, owner)
 
 
 func _load_mount_root() -> String:
