@@ -43,8 +43,8 @@ original code that reads a format; you provide your own copy of the game.
   game directory and it unpacks the game's BND/DCX containers directly, in-process — no
   external unpacking tool needed
 
-See `CLAUDE.md` for the full architecture writeup, `PLAN.md` for the roadmap, and
-`context.md` for the development history behind the trickier decisions.
+See `docs/ARCHITECTURE.md` for the full architecture writeup, `docs/PLAN.md` for the roadmap,
+and `docs/context.md` for the development history behind the trickier decisions.
 
 ## Contributing
 
@@ -53,8 +53,8 @@ Want to help? See `CONTRIBUTING.md` for the contributor workflow.
 ## Requirements
 
 - Godot 4.7 (.NET/Mono build)
-- .NET SDK 8.0 (Godot's C# tooling requires it specifically — see `CLAUDE.md` if you're
-  on a machine that only ships newer .NET runtimes)
+- .NET SDK 8.0 (Godot's C# tooling requires it specifically — see `docs/ARCHITECTURE.md`
+  if you're on a machine that only ships newer .NET runtimes)
 - Your own legal copy of Demon's Souls (PS3), dumped and unmodified
 
 ## Getting started
