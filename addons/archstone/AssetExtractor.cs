@@ -13,7 +13,7 @@ namespace Archstone;
 // identically from archstone.gd and the headless extract_cli.gd script.
 public partial class AssetExtractor : RefCounted
 {
-	// The only categories the importer actually reads - see CLAUDE.md.
+	// The only categories the importer actually reads - see docs/ARCHITECTURE.md.
 	// ponytail: flat allowlist, extend when animation/collision import needs a new category.
 	public static readonly string[] KnownCategories = { "chr", "map", "obj", "parts", "mtd" };
 

@@ -14,6 +14,11 @@ uniform sampler2D specular : hint_default_black;
 // terrain_blend.gdshader).
 uniform sampler2D lightmap : hint_default_white;
 
+// g_DiffuseMapColor(Power) tint - real per-material .mtd data this shader family didn't read
+// at all before (see FlverModelBuilder.ResolveMtdShading). Default is a true no-op (white/
+// untinted), matching what this shader did previously.
+uniform vec3 diffuse_tint : source_color = vec3(1.0);
+
 // A straight diffuse*lightmap multiply is confirmed architecturally wrong (see CLAUDE.md's
 // lightmap section) - the real shader shape (hemisphere-ambient floor untouched by the
 // lightmap, lightmap only scaling a secondary env term) lives in hemisphere_ambient.gdshaderinc,
@@ -26,7 +31,7 @@ uniform sampler2D lightmap : hint_default_white;
 // Godot's shader built-ins can only be assigned directly inside fragment() itself, not from
 // a helper function called from it, even a #include-d one only ever called from there.
 void lightmap_shade(vec2 uv, vec2 uv2, out vec3 albedo, out vec3 normal_map_out, out float metallic, out vec3 emission) {
-	vec3 diffuse_color = texture(diffuse, uv).rgb;
+	vec3 diffuse_color = texture(diffuse, uv).rgb * diffuse_tint;
 	vec3 lm = texture(lightmap, uv2).rgb;
 	float spec = texture(specular, uv).r;
 

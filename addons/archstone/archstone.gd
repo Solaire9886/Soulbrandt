@@ -15,6 +15,7 @@ var _progress_label: Label
 var _message_dialog: AcceptDialog
 var _load_files_dialog: EditorFileDialog
 var _load_folder_dialog: EditorFileDialog
+var _load_map_dialog: EditorFileDialog
 var _loader
 
 
@@ -32,7 +33,7 @@ func _enter_tree() -> void:
 	add_control_to_container(EditorPlugin.CONTAINER_TOOLBAR, import_button)
 	import_button.get_node("MenuButton").get_popup().id_pressed.connect(_on_menu_item_pressed)
 
-	# No EditorSceneFormatImporter for .flver anymore - see CLAUDE.md's Architecture section.
+	# No EditorSceneFormatImporter for .flver anymore - see docs/ARCHITECTURE.md's Architecture section.
 	# One FlverLoader instance for the whole editor session so its cache persists across loads.
 	_loader = load("res://addons/archstone/FlverLoader.cs").new()
 
@@ -41,7 +42,7 @@ func _exit_tree() -> void:
 	remove_control_from_container(EditorPlugin.CONTAINER_TOOLBAR, import_button)
 
 	import_button.free()
-	for dialog in [_mount_dialog, _import_scope_dialog, _category_dialog, _clear_confirm_dialog, _progress_dialog, _message_dialog, _load_files_dialog, _load_folder_dialog]:
+	for dialog in [_mount_dialog, _import_scope_dialog, _category_dialog, _clear_confirm_dialog, _progress_dialog, _message_dialog, _load_files_dialog, _load_folder_dialog, _load_map_dialog]:
 		if dialog:
 			dialog.queue_free()
 
@@ -60,6 +61,8 @@ func _on_menu_item_pressed(id: int) -> void:
 	elif id == 5:
 		_loader.EvictAll()
 		_show_message("Cache cleared", "Every previously loaded model will rebuild from source next time it's loaded.")
+	elif id == 6:
+		_show_load_map_dialog()
 
 
 func _show_mount_dialog() -> void:
@@ -259,6 +262,39 @@ func _show_load_folder_dialog() -> void:
 	_load_folder_dialog.dir_selected.connect(_on_load_folder_selected)
 	EditorInterface.get_base_control().add_child(_load_folder_dialog)
 	_load_folder_dialog.popup_centered_ratio(0.7)
+
+
+func _show_load_map_dialog() -> void:
+	_load_map_dialog = EditorFileDialog.new()
+	_load_map_dialog.title = "Select .msb map(s) to load - map-piece placements only, see docs/ARCHITECTURE.md"
+	_load_map_dialog.file_mode = EditorFileDialog.FILE_MODE_OPEN_FILES
+	_load_map_dialog.access = EditorFileDialog.ACCESS_FILESYSTEM
+	_load_map_dialog.add_filter("*.msb", "MSB Maps")
+
+	var mapstudio_dir := ProjectSettings.globalize_path("res://mounted/map/mapstudio")
+	if DirAccess.dir_exists_absolute(mapstudio_dir):
+		_load_map_dialog.current_dir = mapstudio_dir
+
+	_load_map_dialog.files_selected.connect(_on_maps_selected)
+	EditorInterface.get_base_control().add_child(_load_map_dialog)
+	_load_map_dialog.popup_centered_ratio(0.7)
+
+
+func _on_maps_selected(paths: PackedStringArray) -> void:
+	if paths.is_empty():
+		return
+
+	var target := _pick_load_target()
+	if not target:
+		_show_message("No scene open", "Open or create a scene first - loaded maps are placed under the edited scene's root, or the currently selected scene-tree node.")
+		return
+
+	for path in paths:
+		var inst: Node3D = _loader.InstantiateMap(ProjectSettings.localize_path(path))
+		target.add_child(inst)
+		_set_owner_recursive(inst, target.owner if target.owner else target)
+
+	_show_message("Map(s) loaded", "Loaded %d map(s) under '%s'." % [paths.size(), target.name])
 
 
 func _on_files_selected(paths: PackedStringArray) -> void:

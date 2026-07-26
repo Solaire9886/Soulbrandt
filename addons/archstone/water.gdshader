@@ -45,6 +45,11 @@ uniform vec3 fresnel_color : source_color = vec3(1.0, 1.0, 1.0);
 // g_WaterFadeBegin - real per-material data (varies 0.3-1.0 game-wide), previously unused.
 // Read as a shallow/deep transition distance for the depth-fade below.
 uniform float water_fade_begin = 0.5;
+// g_BumpMapSmoose - real per-material data (-0.5 to 1 game-wide), previously the one real
+// water .mtd param this shader didn't read at all. Applied as a wave-normal intensity scale
+// below (an uncalibrated guess at intent, same category as wave_detail_scale/refraction_scale
+// - no ground truth for what the original shader actually did with this value).
+uniform float bump_smoose = 1.0;
 
 void fragment() {
 	// Multi-octave scrolling wave normals - g_TileScale_N/g_TexScroll_N/g_TileBlend_N are
@@ -70,6 +75,7 @@ void fragment() {
 	vec3 n2 = texture(bumpmap, (UV * tile_scale_2 + tex_scroll_2 * TIME) * wave_detail_scale).rgb * 2.0 - 1.0;
 	float wsum = max(tile_blend_0 + tile_blend_1 + tile_blend_2, 0.001);
 	vec3 tangentNormal = normalize((n0 * tile_blend_0 + n1 * tile_blend_1 + n2 * tile_blend_2) / wsum);
+	tangentNormal = normalize(vec3(tangentNormal.xy * bump_smoose, tangentNormal.z));
 	NORMAL_MAP = tangentNormal * 0.5 + 0.5;
 
 	vec3 N = normalize(TANGENT * tangentNormal.x + BINORMAL * tangentNormal.y + NORMAL * tangentNormal.z);

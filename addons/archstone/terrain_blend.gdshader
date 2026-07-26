@@ -22,6 +22,12 @@ uniform sampler2D specular2 : hint_default_black;
 // packs it into the mesh's Custom0 channel instead (as raw floats, read back below).
 uniform sampler2D lightmap : hint_default_white;
 
+// Same tint gap the single-layer lightmap family had (see
+// lightmap_common.gdshaderinc/FlverModelBuilder.ResolveMtdShading) - there's only one
+// g_DiffuseMapColor per material (no _2 variant), so the tint applies after the two layers
+// are already blended below, not per-layer.
+uniform vec3 diffuse_tint : source_color = vec3(1.0);
+
 // A straight diffuse*lightmap multiply here had the same architecturally-wrong shape as the
 // single-layer path (see CLAUDE.md's Lightmaps section) - shares the hemisphere-ambient/env
 // fix via hemisphere_ambient.gdshaderinc rather than duplicating it a second time.
@@ -58,7 +64,7 @@ void fragment() {
 	// sun disabled, and confirmed absent from the real game - see context.md. What this
 	// channel actually encodes is unknown; it's read (via VertexColor above) but
 	// deliberately left unused here.
-	vec3 diffuse_color = mix(texture(diffuse1, UV).rgb, texture(diffuse2, UV2).rgb, blend);
+	vec3 diffuse_color = mix(texture(diffuse1, UV).rgb, texture(diffuse2, UV2).rgb, blend) * diffuse_tint;
 	vec3 lm = texture(lightmap, lightmap_uv).rgb;
 	float spec = mix(texture(specular1, UV).r, texture(specular2, UV2).r, blend);
 	vec3 env = lm * env_color * env_intensity;

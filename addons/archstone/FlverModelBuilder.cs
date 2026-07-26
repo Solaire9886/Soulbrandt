@@ -8,10 +8,10 @@ using SoulsFormats;
 namespace Archstone;
 
 // FLVER0 parsing/mesh/material/texture-resolution logic. No Godot import-system dependency -
-// only ever driven by FlverLoader, single-threaded (see CLAUDE.md's Architecture section).
+// only ever driven by FlverLoader, single-threaded (see docs/ARCHITECTURE.md's Architecture section).
 public partial class FlverModelBuilder : RefCounted
 {
-	// Keyed by resolved directory; merges every *.tpf found there. See CLAUDE.md's "Texture
+	// Keyed by resolved directory; merges every *.tpf found there. See docs/ARCHITECTURE.md's "Texture
 	// resolution" section for the CandidateDirs rules that produce the directory keys.
 	private readonly Dictionary<string, Dictionary<string, TPF.Texture>> _dirTextureCache = new();
 
@@ -19,7 +19,7 @@ public partial class FlverModelBuilder : RefCounted
 	// identity since it has no Equals/GetHashCode override.
 	private readonly Dictionary<TPF.Texture, ImageTexture> _decodedTextureCache = new();
 
-	// ponytail: whole-cache clear on budget overrun, not per-entry LRU - see CLAUDE.md.
+	// ponytail: whole-cache clear on budget overrun, not per-entry LRU - see docs/ARCHITECTURE.md.
 	private long _decodedBytes;
 
 	// 25% of GC-reported available memory, floored at 256MB - scales down on weaker hardware.
@@ -65,14 +65,20 @@ public partial class FlverModelBuilder : RefCounted
 		string flverPath = ProjectSettings.GlobalizePath(path);
 		var flver = FLVER0.Read(flverPath);
 
-		var materialCache = new Dictionary<int, Material>();
+		// Keyed by (materialIndex, CullBackfaces) - not materialIndex alone, since a mesh's own
+		// CullBackfaces is a real per-mesh flag that can differ across meshes sharing one
+		// material (confirmed: 39 real files, mostly hair/parts). See GetOrBuildMaterial.
+		var materialCache = new Dictionary<(int, bool), Material>();
 		var importerMesh = new ImporterMesh();
 		anySurface = false;
 
 		foreach (var flverMesh in flver.Meshes)
 		{
-			var material = GetOrBuildMaterial(flverMesh.MaterialIndex, flver, materialCache, flverPath);
+			var material = GetOrBuildMaterial(flverMesh.MaterialIndex, flverMesh.CullBackfaces, flver, materialCache, flverPath);
 			var (_, isBlend, hasLightmap) = ClassifyMaterial(flver.Materials[flverMesh.MaterialIndex]);
+			// Indexed per-vertex below via v.BoneIndices[0] - a single mesh can mix vertices
+			// rigidly bound to different nodes (see docs/ARCHITECTURE.md's "Rigid mesh-to-node binding" note).
+			var rigidTransforms = GetRigidNodeTransforms(flver, flverMesh);
 
 			// Blend materials use UV1 for their second layer; non-blend materials with a lightmap
 			// use UV1 for the lightmap itself. Either way, one extra UV channel is needed.
@@ -94,13 +100,24 @@ public partial class FlverModelBuilder : RefCounted
 			for (int i = 0; i < vertCount; i++)
 			{
 				var v = vertices[i];
-				// X negated to match Godot's coordinate convention (mirror of FLVER's) - see CLAUDE.md.
-				positions[i] = new Vector3(-v.Position.X, v.Position.Y, v.Position.Z);
+				// Rigid mesh-to-node bind applied first, in FLVER space - see docs/ARCHITECTURE.md's
+				// "Rigid mesh-to-node binding" note. Identity (a no-op) for meshes that don't use it.
+				var rigidTransform = rigidTransforms[v.BoneIndices[0]];
+				var pos = System.Numerics.Vector3.Transform(v.Position, rigidTransform);
+				// X negated to match Godot's coordinate convention (mirror of FLVER's) - see docs/ARCHITECTURE.md.
+				positions[i] = new Vector3(-pos.X, pos.Y, pos.Z);
 				// Some FLVER0 meshes' BufferLayout genuinely omits Normal/Color/UV - fall back to
-				// a neutral default rather than indexing [0] unconditionally (see CLAUDE.md).
-				normals[i] = v.Normals.Count > 0
-					? new Vector3(-v.Normals[0].X, v.Normals[0].Y, v.Normals[0].Z)
-					: Vector3.Up;
+				// a neutral default rather than indexing [0] unconditionally (see docs/ARCHITECTURE.md).
+				if (v.Normals.Count > 0)
+				{
+					var normal = System.Numerics.Vector3.Normalize(
+						System.Numerics.Vector3.TransformNormal(v.Normals[0], rigidTransform));
+					normals[i] = new Vector3(-normal.X, normal.Y, normal.Z);
+				}
+				else
+				{
+					normals[i] = Vector3.Up;
+				}
 				colors[i] = v.Colors.Count > 0
 					? new Color(v.Colors[0].R, v.Colors[0].G, v.Colors[0].B, v.Colors[0].A)
 					: Colors.White;
@@ -117,7 +134,7 @@ public partial class FlverModelBuilder : RefCounted
 			}
 
 			// Winding swapped (two indices per face) because the X negation above flips the
-			// apparent winding of every triangle - see CLAUDE.md.
+			// apparent winding of every triangle - see docs/ARCHITECTURE.md.
 			// doCheckFlip is only meaningful (and only requested) when the mesh's vertices
 			// actually carry Normal data - it reads Normal internally and crashes otherwise.
 			bool canCheckFlip = vertCount > 0 && vertices[0].Normals.Count > 0;
@@ -157,10 +174,44 @@ public partial class FlverModelBuilder : RefCounted
 		return importerMesh;
 	}
 
-	private Material GetOrBuildMaterial(int materialIndex, FLVER0 flver,
-		Dictionary<int, Material> cache, string flverPath)
+	// A static (UseBoneWeights=false) mesh's own small BoneIndices palette (fixed length 28,
+	// MaxBoneCount) can list more than one node - a single mesh can mix vertices rigidly bound
+	// to different nodes, selected per-vertex via v.BoneIndices[0] indexing into this palette
+	// (confirmed: a mesh with a 2-entry palette had real vertices referencing both entries, not
+	// padding - see docs/ARCHITECTURE.md's "Rigid mesh-to-node binding" note and docs/context.md). Each palette
+	// entry's own Translation/Rotation/Scale (and its ancestors', walking ParentIndex) is composed
+	// here; unused palette slots (-1, or any index for a per-vertex-weighted mesh) resolve to
+	// identity - a real skeletal-skinning mesh is out of scope, not implemented, see "Known
+	// deferred work", and is left untransformed, matching behavior before this fix existed.
+	private static System.Numerics.Matrix4x4[] GetRigidNodeTransforms(FLVER0 flver, FLVER0.Mesh mesh)
 	{
-		if (cache.TryGetValue(materialIndex, out var cached)) return cached;
+		var transforms = new System.Numerics.Matrix4x4[mesh.BoneIndices.Length];
+		if (mesh.UseBoneWeights)
+		{
+			Array.Fill(transforms, System.Numerics.Matrix4x4.Identity);
+			return transforms;
+		}
+
+		for (int p = 0; p < mesh.BoneIndices.Length; p++)
+		{
+			var transform = System.Numerics.Matrix4x4.Identity;
+			short nodeIndex = mesh.BoneIndices[p];
+			while (nodeIndex >= 0 && nodeIndex < flver.Nodes.Count)
+			{
+				var node = flver.Nodes[nodeIndex];
+				transform *= node.ComputeLocalTransform();
+				nodeIndex = node.ParentIndex;
+			}
+			transforms[p] = transform;
+		}
+		return transforms;
+	}
+
+	private Material GetOrBuildMaterial(int materialIndex, bool cullBackfaces, FLVER0 flver,
+		Dictionary<(int, bool), Material> cache, string flverPath)
+	{
+		var key = (materialIndex, cullBackfaces);
+		if (cache.TryGetValue(key, out var cached)) return cached;
 
 		var flverMaterial = flver.Materials[materialIndex];
 		InferMissingParamNames(flverMaterial);
@@ -175,7 +226,16 @@ public partial class FlverModelBuilder : RefCounted
 					? BuildLightmapMaterial(flverMaterial, flverPath)
 					: BuildStandardMaterial(flverMaterial, flverPath);
 
-		cache[materialIndex] = mat;
+		// FLVER0's own CullBackfaces=false ("can be seen through from behind", e.g. glass
+		// panes) was being parsed and then never applied anywhere - root cause of m2304b0's
+		// "standglass" windows rendering single-sided on the wrong face. Only StandardMaterial3D
+		// has a real per-instance cull property; ShaderMaterial's cull mode is a compile-time
+		// render_mode, so lightmap/blend/water materials don't get this yet (338 meshes
+		// game-wide affected on the lightmap path - see docs/ARCHITECTURE.md's "Known deferred work").
+		if (!cullBackfaces && mat is StandardMaterial3D std)
+			std.CullMode = BaseMaterial3D.CullModeEnum.Disabled;
+
+		cache[key] = mat;
 		return mat;
 	}
 
@@ -183,11 +243,11 @@ public partial class FlverModelBuilder : RefCounted
 	// selection can't drift out of sync.
 	private static (bool IsWater, bool IsBlend, bool HasLightmap) ClassifyMaterial(FLVER0.Material mat)
 	{
-		// g_Envmap uniquely identifies water materials game-wide - see CLAUDE.md.
+		// g_Envmap uniquely identifies water materials game-wide - see docs/ARCHITECTURE.md.
 		bool isWater = mat.Textures.Any(t => t.ParamName == "g_Envmap");
 
 		// Gated on the MTD's "[M]"/"[ML]" blend-shader tag, not g_Specular_2/g_Bumpmap_2
-		// presence (each is independently optional per layer) - see CLAUDE.md.
+		// presence (each is independently optional per layer) - see docs/ARCHITECTURE.md.
 		bool isBlend = !isWater
 			&& (mat.MTD.Contains("[M]") || mat.MTD.Contains("[ML]"))
 			&& mat.Textures.Any(t => t.ParamName == "g_Diffuse_2");
@@ -225,7 +285,7 @@ public partial class FlverModelBuilder : RefCounted
 	}
 
 	// Ordered candidate directories for a texture reference, most-trusted first - see
-	// CLAUDE.md's "Texture resolution" section for what each rule covers and why.
+	// docs/ARCHITECTURE.md's "Texture resolution" section for what each rule covers and why.
 	private IEnumerable<string?> CandidateDirs(FLVER0.Material mat, FLVER0.Texture texRef, string flverPath)
 	{
 		yield return OwnModelDir(flverPath);
@@ -278,7 +338,7 @@ public partial class FlverModelBuilder : RefCounted
 	}
 
 	// Another texture slot on the same material that resolves under mounted/map - recovers a
-	// stale/copy-pasted reference (see CLAUDE.md, e.g. the Nexus archstones).
+	// stale/copy-pasted reference (see docs/ARCHITECTURE.md, e.g. the Nexus archstones).
 	private string? SiblingMapAreaDir(FLVER0.Material mat, FLVER0.Texture exclude)
 	{
 		string mapRoot = System.IO.Path.Combine(_mountedRoot, "map");
@@ -361,7 +421,50 @@ public partial class FlverModelBuilder : RefCounted
 			mat.BlendMode = BaseMaterial3D.BlendModeEnum.Add;
 		}
 
+		// StandardMaterial3D's own Roughness/AlbedoColor defaults (1.0 fully matte, white) are
+		// what made every chr/parts material look flat regardless of g_Specular - see
+		// ResolveMtdShading. AlbedoColor multiplies natively against AlbedoTexture in Godot's
+		// own built-in shader, so the tint needs no shader changes here.
+		var (roughness, tint) = ResolveMtdShading(flverMaterial);
+		mat.Roughness = roughness;
+		mat.AlbedoColor = tint;
+
 		return mat;
+	}
+
+	// Shared by all three material families that read real .mtd data for shading beyond what
+	// FLVER0's own material struct exposes (Standard/Lightmap/Blend - Water has its own
+	// dedicated per-param read, see BuildWaterMaterial). One MTD.Read() per material instead
+	// of one per property. Falls back to StandardMaterial3D's own defaults (roughness 1.0,
+	// tint white/no-op) if the .mtd can't be found/parsed.
+	private (float Roughness, Color Tint) ResolveMtdShading(FLVER0.Material flverMaterial)
+	{
+		string mtdName = System.IO.Path.GetFileName(flverMaterial.MTD.Replace('\\', '/'));
+		if (_mtdIndex.TryGetValue(mtdName, out var mtdPath))
+		{
+			try
+			{
+				var mtd = MTD.Read(mtdPath);
+				// Phong exponent -> GGX roughness approximation: roughness = sqrt(2/(n+2)).
+				float specularPower = GetMtdFloat(mtd, "g_SpecularPower", 8.0f);
+				float roughness = Mathf.Clamp(Mathf.Sqrt(2.0f / (specularPower + 2.0f)), 0.05f, 1.0f);
+
+				// g_DiffuseMapColor is a real per-material tint (568/584 mtds leave it white,
+				// a no-op, but a real minority - light shafts, thunder VFX, the Wanderer ghost
+				// effect - don't). g_DiffuseMapColorPower genuinely varies (0-7 game-wide, not
+				// a fixed authoring constant) and is applied as a real exponent, not ignored.
+				var tint = GetMtdColor3(mtd, "g_DiffuseMapColor", Colors.White);
+				float power = GetMtdFloat(mtd, "g_DiffuseMapColorPower", 1.0f);
+				tint = new Color(
+					Mathf.Pow(Mathf.Clamp(tint.R, 0f, 1f), power),
+					Mathf.Pow(Mathf.Clamp(tint.G, 0f, 1f), power),
+					Mathf.Pow(Mathf.Clamp(tint.B, 0f, 1f), power));
+
+				return (roughness, tint);
+			}
+			catch (Exception) { /* fall through to defaults below */ }
+		}
+		return (1.0f, Colors.White);
 	}
 
 	// Non-blend materials with a real g_Lightmap - StandardMaterial3D has no independent-UV
@@ -395,6 +498,16 @@ public partial class FlverModelBuilder : RefCounted
 		if (shader == _lightmapShader)
 			mat.SetShaderParameter("alpha_scissor_threshold", scissorThreshold);
 
+		// g_DiffuseMapColor tint only - NOT roughness. Roughness was tried here too (2026-07-25)
+		// and reverted the same day: it exposed a pre-existing metallic=spec line (see
+		// lightmap_common.gdshaderinc) that made every lightmapped surface read as a washed-out
+		// metallic sheen with no real WorldEnvironment/reflection probe to actually reflect -
+		// user-confirmed regression. See docs/ARCHITECTURE.md's "Known deferred work" for the full story;
+		// this needs a real environment/lighting setup (and probably g_LightingType gating)
+		// before it can be revisited, not a quick re-guess.
+		var (_, tint) = ResolveMtdShading(flverMaterial);
+		mat.SetShaderParameter("diffuse_tint", tint);
+
 		return mat;
 	}
 
@@ -416,6 +529,12 @@ public partial class FlverModelBuilder : RefCounted
 		Assign("g_Specular", "specular1");
 		Assign("g_Specular_2", "specular2");
 		Assign("g_Lightmap", "lightmap"); // optional - shader's lightmap uniform no-ops if unset
+
+		// Tint only, not roughness - see BuildLightmapMaterial for why. There's only one
+		// g_DiffuseMapColor per material (no _2 variant), so the tint applies to the
+		// already-blended diffuse1/diffuse2 result, not per-layer.
+		var (_, tint) = ResolveMtdShading(flverMaterial);
+		mat.SetShaderParameter("diffuse_tint", tint);
 
 		return mat;
 	}
@@ -460,6 +579,11 @@ public partial class FlverModelBuilder : RefCounted
 				mat.SetShaderParameter("fresnel_scale", GetMtdFloat(mtd, "g_FresnelScale", 1.0f));
 				mat.SetShaderParameter("fresnel_color", GetMtdColor3(mtd, "g_FresnelColor", Colors.White));
 				mat.SetShaderParameter("water_fade_begin", GetMtdFloat(mtd, "g_WaterFadeBegin", 0.5f));
+				// Real per-material value (-0.5 to 1 game-wide), previously unread despite
+				// this being the one path that already reads every other water .mtd param -
+				// see water.gdshader for how it's applied (an uncalibrated guess at intent,
+				// same category as wave_detail_scale/refraction_scale in that file).
+				mat.SetShaderParameter("bump_smoose", GetMtdFloat(mtd, "g_BumpMapSmoose", 1.0f));
 			}
 			catch (Exception) { /* keep shader defaults */ }
 		}
