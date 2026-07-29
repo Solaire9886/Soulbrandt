@@ -86,13 +86,14 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
    - **MSB (level layout) parsing is a hard prerequisite**, not an optional nicety — it's
      the only source of "what's actually placed, where, with what transform" for a given
      map, and (see below) the only source of per-instance lighting/fog data too.
-     `SoulsFormatsNEXT`'s `MSB1` reader currently **cannot read Demon's Souls' own MSBs at
-     all** - it assumes Dark Souls 1's `Treasure` event field layout
-     (`MSB1/EventParam.cs`, `Treasure.ReadTypeData`'s trailing `AssertInt16(0)`), which
-     doesn't match this game's real data and throws immediately, aborting the whole read
-     before even reaching the Parts section. Needs the same kind of hand-patch already
-     applied once to this vendored library for the FLVER0 UV-factor bug - fixing this is
-     the actual first step of building this system, not a side detail.
+     **The `MSB1`-can't-read-DeS blocker described here previously is stale — DeS uses a
+     wholly separate `MSBD` reader, not `MSB1`, and `MsbLoader.cs` (2026-07-24, see
+     docs/ARCHITECTURE.md's "MSB map placement") already reads real `.msb` files end to end
+     via `MSBD.Read()` with no patch needed.** `MSB1`'s DS1-specific `Treasure` bug is
+     simply irrelevant to this game. Re-confirmed 2026-07-26: `MSBD.Read()` (which reads
+     `Events` too, not just `Parts`) completes cleanly on every `.msb` spot-checked
+     (`m01_00_00_00`, `m03_00_00_00`, `m03_01_00_00`, `m08_00_00_00`) with no assert
+     failures anywhere in the file, not just up to the Parts section.
    - **Per-part lighting/fog (`LightID`/`FogID`) resolution belongs here, not as a
      separate system** — confirmed real and readable this session, not just a lead
      anymore: DeS's own `MSBD.PartsParam.LightID`/`FogID` byte fields (`SoulsFormatsNEXT`
@@ -108,16 +109,26 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
      import time" (what the importer does for everything today) doesn't fit. The
      assembler needs to set each *placed instance's own* shader uniforms
      (`ambient_up`/`ambient_down`/`env_color`/`env_intensity`/`env_spc_color`/
-     `env_spc_intensity`, already wired into `addons/archstone/hemisphere_ambient.gdshaderinc`
+     `env_spc_intensity`, already wired into `addons/archstone/shaders/hemisphere_ambient.gdshaderinc`
      and shared by `lightmap_common.gdshaderinc`/`terrain_blend.gdshader` - see docs/ARCHITECTURE.md's
      "Lightmaps" section) as a per-node material override at placement time via Godot's
      `set_shader_parameter`, rather than relying on the shared `default_lightbank.param`
      row-0 fallback every lightmapped material currently uses. `FogID` likely drives real
      per-map distance fog (`FOG_BANK`'s `fogBeginZ`/`fogEndZ`/color/intensity, already
      confirmed readable) via `WorldEnvironment`'s fog settings once that node exists (see
-     below) - whether it meaningfully varies per-part within one map, or is effectively
-     one dominant value per map in practice, isn't known yet; find out once real MSB data
-     is actually being walked instead of assuming either way.
+     below). **`LightID`/`FogID` do meaningfully vary per-part within a single map, not
+     one dominant value** — confirmed 2026-07-26 via a throwaway `MsbLoader` dump across
+     4 real maps: `m01_00_00_00` (Nexus) alone has `MapPieces` spanning `LightID`
+     `{0,1,3,11,255}`, `Objects` spanning `{0,1,2,4,6,11,58}`, and `Collisions` a visibly
+     disjoint range `{0,58-63}` from either — collision geometry apparently draws from its
+     own row block. `255` shows up only on `MapPieces`/never on `Objects`/`Collisions` in
+     the maps checked, and is the likely "unset, use default" sentinel (matching this
+     format's usual `0xFF`-as-unset convention) rather than a real row index — worth
+     confirming once actual per-row resolution is wired, not assumed now. Per-map variety
+     also confirmed real, not just per-part: `m03_00_00_00` (a near-empty shell — 4
+     `MapPieces`, likely a stub the game's real Boletaria sub-blocks route through) has a
+     single flat `LightID={0}`, while its populated sibling `m03_01_00_00` spans `{0,1,2}`
+     on `MapPieces` and `{0,5,6,7}` on `Objects`/`Collisions`.
    - **A real `WorldEnvironment`/tonemap/exposure setup belongs here too, not as a
      separate task.** docs/ARCHITECTURE.md's water and lightmap sections both already note that
      brightness/contrast comparisons so far have been against the editor's own opaque
@@ -127,7 +138,12 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
      first point where a whole real map scene gets assembled (not a single loose test
      mesh loaded by a throwaway script), which is exactly when a scene-level
      `WorldEnvironment` node needs to exist anyway. Building it as part of the assembler,
-     rather than as a one-off test-scene hack, avoids re-deriving it later.
+     rather than as a one-off test-scene hack, avoids re-deriving it later. Confirmed
+     2026-07-26 to block more than tuning: `StandardMaterial3D.Emission` (texture-driven)
+     was found to render genuinely wrong - not just uncalibrated - without this, ruling
+     out an Emission-based fix for the Nexus's glowing-rune/sky-dome materials until it
+     exists. See docs/ARCHITECTURE.md's "Known deferred work" and docs/context.md's "Nexus
+     VFX gaps investigated" entry.
    - **Cutscene/event data lives in `remo/scnAAxxxx.remobnd`** (`AA` = area number, e.g.
      `scn02xxxx` for Boletaria) - each a real, structured multi-cut sequence (camera
      `.sibcam` + Havok `.hkx` animation per cut, plus a `.tae` timed-event file).
