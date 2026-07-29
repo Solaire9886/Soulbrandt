@@ -35,7 +35,7 @@ func _enter_tree() -> void:
 
 	# No EditorSceneFormatImporter for .flver anymore - see docs/ARCHITECTURE.md's Architecture section.
 	# One FlverLoader instance for the whole editor session so its cache persists across loads.
-	_loader = load("res://addons/archstone/FlverLoader.cs").new()
+	_loader = load("res://addons/archstone/scripts/FlverLoader.cs").new()
 
 
 func _exit_tree() -> void:
@@ -81,7 +81,7 @@ func _show_mount_dialog() -> void:
 
 
 func _on_raw_root_selected(dir: String) -> void:
-	var extractor = load("res://addons/archstone/AssetExtractor.cs").new()
+	var extractor = load("res://addons/archstone/scripts/AssetExtractor.cs").new()
 	var found: Array = []
 	for category in extractor.GetKnownCategories():
 		if DirAccess.dir_exists_absolute(dir.path_join(category)):
@@ -132,7 +132,7 @@ func _show_import_scope_dialog(raw_root: String) -> void:
 
 
 func _show_category_dialog(raw_root: String) -> void:
-	var extractor = load("res://addons/archstone/AssetExtractor.cs").new()
+	var extractor = load("res://addons/archstone/scripts/AssetExtractor.cs").new()
 
 	_category_dialog = ConfirmationDialog.new()
 	_category_dialog.title = "Choose asset categories to extract"
@@ -178,7 +178,7 @@ func _run_extraction(raw_root: String, categories: Array) -> void:
 	_progress_dialog.popup_centered_ratio(0.4)
 
 	var output_root := ProjectSettings.globalize_path("res://mounted")
-	var extractor = load("res://addons/archstone/AssetExtractor.cs").new()
+	var extractor = load("res://addons/archstone/scripts/AssetExtractor.cs").new()
 	extractor.ExtractAsync(raw_root, output_root, categories, Callable(self, "_on_extract_progress"), Callable(self, "_on_extract_complete"))
 
 

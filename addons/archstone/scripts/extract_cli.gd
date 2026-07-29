@@ -26,7 +26,7 @@ func _init():
 		return
 
 	var output_root = ProjectSettings.globalize_path("res://mounted")
-	var extractor = load("res://addons/archstone/AssetExtractor.cs").new()
+	var extractor = load("res://addons/archstone/scripts/AssetExtractor.cs").new()
 
 	print("Extracting ", ("all categories" if categories.is_empty() else str(categories)), " from ", raw_root, " into ", output_root, " ...")
 	extractor.ExtractAsync(raw_root, output_root, categories, Callable(self, "_on_progress"), Callable(self, "_on_complete"))

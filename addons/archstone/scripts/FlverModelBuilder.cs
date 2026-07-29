@@ -36,13 +36,13 @@ public partial class FlverModelBuilder : RefCounted
 
 	private readonly string _mountedRoot = ProjectSettings.GlobalizePath("res://mounted");
 
-	private readonly Shader _blendShader = GD.Load<Shader>("res://addons/archstone/terrain_blend.gdshader");
-	private readonly Shader _waterShader = GD.Load<Shader>("res://addons/archstone/water.gdshader");
+	private readonly Shader _blendShader = GD.Load<Shader>("res://addons/archstone/shaders/terrain_blend.gdshader");
+	private readonly Shader _waterShader = GD.Load<Shader>("res://addons/archstone/shaders/water.gdshader");
 	// Three variants, not one runtime-switched shader: blend_mix/blend_add are compile-time
 	// render_mode keywords in Godot, not a per-material property.
-	private readonly Shader _lightmapShader = GD.Load<Shader>("res://addons/archstone/lightmap.gdshader");
-	private readonly Shader _lightmapAlphaShader = GD.Load<Shader>("res://addons/archstone/lightmap_alpha.gdshader");
-	private readonly Shader _lightmapAddShader = GD.Load<Shader>("res://addons/archstone/lightmap_add.gdshader");
+	private readonly Shader _lightmapShader = GD.Load<Shader>("res://addons/archstone/shaders/lightmap.gdshader");
+	private readonly Shader _lightmapAlphaShader = GD.Load<Shader>("res://addons/archstone/shaders/lightmap_alpha.gdshader");
+	private readonly Shader _lightmapAddShader = GD.Load<Shader>("res://addons/archstone/shaders/lightmap_add.gdshader");
 
 	// Index of mounted/mtd/*.mtd by filename - only the water shader needs real .mtd data
 	// (per-material wave/reflection tuning has no equivalent in FLVER0's own material data).
