@@ -48,5 +48,10 @@ public partial class FlverLoader : RefCounted
 	}
 
 	public void Evict(string path) => _meshCache.Remove(path);
-	public void EvictAll() => _meshCache.Clear();
+
+	public void EvictAll()
+	{
+		_meshCache.Clear();
+		_builder.ResetCaches();
+	}
 }

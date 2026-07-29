@@ -34,6 +34,19 @@ public partial class FlverModelBuilder : RefCounted
 		_decodedBytes = 0;
 	}
 
+	// Full manual reset for "Reload Loaded Models" - not just the mesh cache FlverLoader owns.
+	// A code-only change never needs this (nothing on disk changed), but re-running "Import"
+	// mid-session to pull in new/changed mounted/ content (e.g. modded textures) would otherwise
+	// stay invisible until the editor restarts, since every cache here is scoped to whatever was
+	// on disk the first time each directory/texture was touched this session.
+	public void ResetCaches()
+	{
+		_dirTextureCache.Clear();
+		_decodedTextureCache.Clear();
+		_decodedBytes = 0;
+		_objTextureIndex = null;
+	}
+
 	private readonly string _mountedRoot = ProjectSettings.GlobalizePath("res://mounted");
 
 	private readonly Shader _blendShader = GD.Load<Shader>("res://addons/archstone/shaders/terrain_blend.gdshader");
@@ -292,6 +305,73 @@ public partial class FlverModelBuilder : RefCounted
 		yield return RefPathDir(texRef.Path);
 		yield return SiblingMapAreaDir(mat, texRef);
 		yield return MapPrefixDir(texRef.Path);
+		yield return SiblingObjTextureDir(texRef, flverPath);
+	}
+
+	// Last resort: an unrelated obj/ model's own container that happens to carry this exact
+	// texture name. Covers kitbashed clutter (a map-piece prop, or another obj model) that
+	// references a shared prop-family texture never duplicated into its own container or the
+	// map-area bucket - confirmed real via the o6510_1 bottle/vase case and the m02
+	// firewood/cart/tub map-piece cluster (docs/context.md), both of which cluster by numeric
+	// obj ID proximity (o24xx/o65xx), so ties among multiple hits are broken toward the
+	// closest ID rather than an arbitrary first match. Index built once per session, lazily,
+	// only on first use - most models never miss all four rules above.
+	private Dictionary<string, List<(int Id, string Dir)>>? _objTextureIndex;
+	private static readonly Regex ObjIdSegmentPattern = new(@"^o(\d+)$", RegexOptions.IgnoreCase);
+
+	private void EnsureObjTextureIndex()
+	{
+		if (_objTextureIndex != null) return;
+		_objTextureIndex = new Dictionary<string, List<(int, string)>>(StringComparer.OrdinalIgnoreCase);
+		string objRoot = System.IO.Path.Combine(_mountedRoot, "obj");
+		if (!System.IO.Directory.Exists(objRoot)) return;
+
+		foreach (var dir in System.IO.Directory.GetDirectories(objRoot))
+		{
+			var idMatch = ObjIdSegmentPattern.Match(System.IO.Path.GetFileName(dir));
+			if (!idMatch.Success) continue;
+			int id = int.Parse(idMatch.Groups[1].Value);
+
+			string texDir = System.IO.Path.Combine(dir, "tex");
+			if (!System.IO.Directory.Exists(texDir)) continue;
+
+			// Routed through GetMergedTextures (not LoadDirTextures directly) so this index
+			// build also warms _dirTextureCache - a texture actually resolved via this rule
+			// won't need its tpf re-parsed when ResolveTexture reads it moments later.
+			foreach (var key in GetMergedTextures(texDir).Keys)
+			{
+				if (!_objTextureIndex.TryGetValue(key, out var list))
+					_objTextureIndex[key] = list = new List<(int, string)>();
+				list.Add((id, texDir));
+			}
+		}
+	}
+
+	private string? SiblingObjTextureDir(FLVER0.Texture texRef, string flverPath)
+	{
+		EnsureObjTextureIndex();
+		var key = System.IO.Path.GetFileNameWithoutExtension(texRef.Path.Replace('\\', '/'));
+		if (!_objTextureIndex!.TryGetValue(key, out var candidates) || candidates.Count == 0)
+			return null;
+		if (candidates.Count == 1)
+			return candidates[0].Dir;
+
+		int? ownId = null;
+		foreach (var seg in flverPath.Replace('\\', '/').Split('/'))
+		{
+			var m = ObjIdSegmentPattern.Match(seg);
+			if (m.Success) { ownId = int.Parse(m.Groups[1].Value); break; }
+		}
+		if (ownId == null) return candidates[0].Dir;
+
+		var best = candidates[0];
+		int bestDist = Math.Abs(best.Id - ownId.Value);
+		foreach (var c in candidates)
+		{
+			int dist = Math.Abs(c.Id - ownId.Value);
+			if (dist < bestDist) { bestDist = dist; best = c; }
+		}
+		return best.Dir;
 	}
 
 	private ImageTexture? ResolveTexture(FLVER0.Material flverMaterial, string paramName, string flverPath)
@@ -437,6 +517,15 @@ public partial class FlverModelBuilder : RefCounted
 	// dedicated per-param read, see BuildWaterMaterial). One MTD.Read() per material instead
 	// of one per property. Falls back to StandardMaterial3D's own defaults (roughness 1.0,
 	// tint white/no-op) if the .mtd can't be found/parsed.
+	//
+	// g_DiffuseMapColorPower (real per-material data, 0-7 game-wide) was tried as an
+	// Emission-channel glow boost for VFX-style materials (magic-square runes, the sky dome)
+	// that stay dark under plain Albedo - reverted 2026-07-26, confirmed not fixable from here.
+	// See docs/context.md's "Emission-based VFX glow" entry: StandardMaterial3D's Emission,
+	// unlike Albedo, renders badly wrong (desaturates toward flat white well before energy=1,
+	// reproduced with a synthetic texture with zero FLVER involvement) with no WorldEnvironment/
+	// CameraAttributes anywhere in the project to calibrate exposure against - the same
+	// already-known gap blocking water/lightmap tuning (docs/PLAN.md's map-assembler item).
 	private (float Roughness, Color Tint) ResolveMtdShading(FLVER0.Material flverMaterial)
 	{
 		string mtdName = System.IO.Path.GetFileName(flverMaterial.MTD.Replace('\\', '/'));
