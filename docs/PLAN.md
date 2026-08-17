@@ -94,6 +94,13 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
      `Events` too, not just `Parts`) completes cleanly on every `.msb` spot-checked
      (`m01_00_00_00`, `m03_00_00_00`, `m03_01_00_00`, `m08_00_00_00`) with no assert
      failures anywhere in the file, not just up to the Parts section.
+   - **`MapPieces` (2026-07-24) and `Objects` (2026-08-17) are placed and lit; `Enemy`/
+     `Player` are deliberately held off, not just unscoped.** See docs/ARCHITECTURE.md's
+     "MSB map placement"/"`Objects` placement". User decision (2026-08-17): without any
+     game-logic systems (AI, combat, animation state) built yet, placed enemy/player
+     markers would be inert clutter rather than useful progress — keep MSB work on the
+     graphical/model side (`Collision`/`Navmesh` are still reasonable next slices) until
+     that changes.
    - **Per-part lighting/fog (`LightID`/`FogID`) resolution belongs here, not as a
      separate system** — confirmed real and readable this session, not just a lead
      anymore: DeS's own `MSBD.PartsParam.LightID`/`FogID` byte fields (`SoulsFormatsNEXT`
@@ -144,6 +151,28 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
      out an Emission-based fix for the Nexus's glowing-rune/sky-dome materials until it
      exists. See docs/ARCHITECTURE.md's "Known deferred work" and docs/context.md's "Nexus
      VFX gaps investigated" entry.
+   - **`LightID`/`FogID` resolution shipped 2026-08-17 (`DrawParamReader.cs`,
+     `FlverLoader.InstantiateMap()`'s `ApplyLightBank`), but the env term's exact shape is
+     still a stopgap, not the real formula.** `colR/G/B_u`/`_d` and the `envDif`/`envSpc`
+     equivalents are 0-255 color channels; `colA_u`/`colA_d`/`envDif_colA`/`envSpc_colA` are
+     confirmed via the real `lightbank.paramdef` field metadata (`min=0`, `max=1000`,
+     `default=100`) to be a percent-style intensity scale (`/100`), not a raw multiplier or an
+     alpha channel - fixed after an initial raw-value guess blew every `colA=100` row (the
+     common case) out to solid white. **Still open:** real Nexus `env_intensity`/
+     `env_spc_intensity` values range 1.5x-5x, and the lightmap-scaled env/env_spc terms are
+     left unclamped, which overexposes a minority of bright-lightmap surfaces - confirmed via
+     `m0000B0` (Nexus's end-game ground piece, `LightID=3`, `envDif_colA=450` -> `4.5x`):
+     unclamped, its bright open-ground lightmap texels blow past white while shadowed
+     ruins/crevice texels stay correct, since the env term scales with the lightmap sample
+     itself (see the `HemEnvDifSpc` DSR-source entry above/docs/context.md's "Lightmap/drawparam
+     system, part 4"). A `[0,1]` clamp (`hemisphere_env_term()`) was tried and reverted the
+     same day (2026-08-17) - user-confirmed it visibly dulled most *other* map pieces
+     (m02/Boletaria included) that weren't overexposed to begin with, and the overexposure on
+     the few affected pieces is a more useful marker of what still needs the real fix than a
+     global clamp masking it. The real DSR source's `CalcEnvIBL(...)` is a function call, not a
+     bare multiply, and almost certainly shapes/normalizes this properly. Revisit once the rest
+     of MSB parsing (or at least the lighting-data half) is otherwise done - this is real
+     shader-research, not more data-wiring.
    - **Cutscene/event data lives in `remo/scnAAxxxx.remobnd`** (`AA` = area number, e.g.
      `scn02xxxx` for Boletaria) - each a real, structured multi-cut sequence (camera
      `.sibcam` + Havok `.hkx` animation per cut, plus a `.tae` timed-event file).

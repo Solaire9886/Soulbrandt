@@ -15,7 +15,10 @@ public partial class AssetExtractor : RefCounted
 {
 	// The only categories the importer actually reads - see docs/ARCHITECTURE.md.
 	// ponytail: flat allowlist, extend when animation/collision import needs a new category.
-	public static readonly string[] KnownCategories = { "chr", "map", "obj", "parts", "mtd" };
+	// param/paramdef added for LIGHT_BANK/FOG_BANK (see DrawParamReader.cs) - "param" also pulls
+	// the much larger unrelated gameparam/ folder (item/npc data, unused today) since extraction
+	// is whole-top-level-folder granularity; ~8MB total, not worth a sub-folder filter for that.
+	public static readonly string[] KnownCategories = { "chr", "map", "obj", "parts", "mtd", "param", "paramdef" };
 
 	// Instance wrapper so GDScript can read this without a second copy in archstone.gd.
 	public string[] GetKnownCategories() => KnownCategories;
