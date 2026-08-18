@@ -187,15 +187,11 @@ public partial class FlverModelBuilder : RefCounted
 		return importerMesh;
 	}
 
-	// A static (UseBoneWeights=false) mesh's own small BoneIndices palette (fixed length 28,
-	// MaxBoneCount) can list more than one node - a single mesh can mix vertices rigidly bound
-	// to different nodes, selected per-vertex via v.BoneIndices[0] indexing into this palette
-	// (confirmed: a mesh with a 2-entry palette had real vertices referencing both entries, not
-	// padding - see docs/ARCHITECTURE.md's "Rigid mesh-to-node binding" note and docs/context.md). Each palette
-	// entry's own Translation/Rotation/Scale (and its ancestors', walking ParentIndex) is composed
-	// here; unused palette slots (-1, or any index for a per-vertex-weighted mesh) resolve to
-	// identity - a real skeletal-skinning mesh is out of scope, not implemented, see "Known
-	// deferred work", and is left untransformed, matching behavior before this fix existed.
+	// A static (UseBoneWeights=false) mesh's own small BoneIndices palette can list more than
+	// one node - a single mesh can mix vertices rigidly bound to different nodes, selected
+	// per-vertex via v.BoneIndices[0]. See docs/ARCHITECTURE.md's "Rigid mesh-to-node binding"
+	// note. Unused palette slots (-1, or any index for a per-vertex-weighted mesh) resolve to
+	// identity - real skeletal skinning is out of scope, not implemented.
 	private static System.Numerics.Matrix4x4[] GetRigidNodeTransforms(FLVER0 flver, FLVER0.Mesh mesh)
 	{
 		var transforms = new System.Numerics.Matrix4x4[mesh.BoneIndices.Length];
@@ -309,13 +305,10 @@ public partial class FlverModelBuilder : RefCounted
 	}
 
 	// Last resort: an unrelated obj/ model's own container that happens to carry this exact
-	// texture name. Covers kitbashed clutter (a map-piece prop, or another obj model) that
-	// references a shared prop-family texture never duplicated into its own container or the
-	// map-area bucket - confirmed real via the o6510_1 bottle/vase case and the m02
-	// firewood/cart/tub map-piece cluster (docs/context.md), both of which cluster by numeric
-	// obj ID proximity (o24xx/o65xx), so ties among multiple hits are broken toward the
-	// closest ID rather than an arbitrary first match. Index built once per session, lazily,
-	// only on first use - most models never miss all four rules above.
+	// texture name (a shared prop-family texture never duplicated into its own container or
+	// the map-area bucket - see docs/ARCHITECTURE.md's Texture resolution rule 5). Hits cluster
+	// by numeric obj ID proximity, so ties break toward the closest ID rather than an arbitrary
+	// first match. Index built once per session, lazily, only on first use.
 	private Dictionary<string, List<(int Id, string Dir)>>? _objTextureIndex;
 	private static readonly Regex ObjIdSegmentPattern = new(@"^o(\d+)$", RegexOptions.IgnoreCase);
 
@@ -505,28 +498,25 @@ public partial class FlverModelBuilder : RefCounted
 		// what made every chr/parts material look flat regardless of g_Specular - see
 		// ResolveMtdShading. AlbedoColor multiplies natively against AlbedoTexture in Godot's
 		// own built-in shader, so the tint needs no shader changes here.
-		var (roughness, tint) = ResolveMtdShading(flverMaterial);
+		var (roughness, tint, isUnlit) = ResolveMtdShading(flverMaterial);
 		mat.Roughness = roughness;
 		mat.AlbedoColor = tint;
+		// g_LightingType=0 (sky domes, ghost/dissolve, additive VFX) means no dynamic lighting
+		// at all in the source engine - see docs/ARCHITECTURE.md's Architecture section.
+		if (isUnlit)
+			mat.ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded;
 
 		return mat;
 	}
 
 	// Shared by all three material families that read real .mtd data for shading beyond what
-	// FLVER0's own material struct exposes (Standard/Lightmap/Blend - Water has its own
-	// dedicated per-param read, see BuildWaterMaterial). One MTD.Read() per material instead
-	// of one per property. Falls back to StandardMaterial3D's own defaults (roughness 1.0,
-	// tint white/no-op) if the .mtd can't be found/parsed.
-	//
-	// g_DiffuseMapColorPower (real per-material data, 0-7 game-wide) was tried as an
-	// Emission-channel glow boost for VFX-style materials (magic-square runes, the sky dome)
-	// that stay dark under plain Albedo - reverted 2026-07-26, confirmed not fixable from here.
-	// See docs/context.md's "Emission-based VFX glow" entry: StandardMaterial3D's Emission,
-	// unlike Albedo, renders badly wrong (desaturates toward flat white well before energy=1,
-	// reproduced with a synthetic texture with zero FLVER involvement) with no WorldEnvironment/
-	// CameraAttributes anywhere in the project to calibrate exposure against - the same
-	// already-known gap blocking water/lightmap tuning (docs/PLAN.md's map-assembler item).
-	private (float Roughness, Color Tint) ResolveMtdShading(FLVER0.Material flverMaterial)
+	// FLVER0's own material struct exposes (Water has its own dedicated read, see
+	// BuildWaterMaterial). One MTD.Read() per material instead of one per property. Falls back
+	// to StandardMaterial3D's own defaults (roughness 1.0, tint white/no-op) if unreadable.
+	// An Emission-channel glow boost for these same VFX-style materials was tried and reverted
+	// - see docs/context.md's "Nexus VFX gaps investigated" entry for why; g_LightingType=0
+	// (the ShadingMode.Unshaded branch above) turned out to be the real mechanism instead.
+	private (float Roughness, Color Tint, bool IsUnlit) ResolveMtdShading(FLVER0.Material flverMaterial)
 	{
 		string mtdName = System.IO.Path.GetFileName(flverMaterial.MTD.Replace('\\', '/'));
 		if (_mtdIndex.TryGetValue(mtdName, out var mtdPath))
@@ -549,11 +539,17 @@ public partial class FlverModelBuilder : RefCounted
 					Mathf.Pow(Mathf.Clamp(tint.G, 0f, 1f), power),
 					Mathf.Pow(Mathf.Clamp(tint.B, 0f, 1f), power));
 
-				return (roughness, tint);
+				// g_LightingType corpus-scanned 2026-08-18 (612 mtds): a clean three-way split,
+				// 1=Phong (chr/parts metal/leather), 3=HemEnv (lightmap/blend), 0=every sky dome
+				// variant plus the ghost/dissolve and additive-VFX materials already flagged
+				// elsewhere in this file/docs/ARCHITECTURE.md - real, not a guess.
+				int lightingType = GetMtdInt(mtd, "g_LightingType", 1);
+
+				return (roughness, tint, lightingType == 0);
 			}
 			catch (Exception) { /* fall through to defaults below */ }
 		}
-		return (1.0f, Colors.White);
+		return (1.0f, Colors.White, false);
 	}
 
 	// Non-blend materials with a real g_Lightmap - StandardMaterial3D has no independent-UV
@@ -587,14 +583,10 @@ public partial class FlverModelBuilder : RefCounted
 		if (shader == _lightmapShader)
 			mat.SetShaderParameter("alpha_scissor_threshold", scissorThreshold);
 
-		// g_DiffuseMapColor tint only - NOT roughness. Roughness was tried here too (2026-07-25)
-		// and reverted the same day: it exposed a pre-existing metallic=spec line (see
-		// lightmap_common.gdshaderinc) that made every lightmapped surface read as a washed-out
-		// metallic sheen with no real WorldEnvironment/reflection probe to actually reflect -
-		// user-confirmed regression. See docs/ARCHITECTURE.md's "Known deferred work" for the full story;
-		// this needs a real environment/lighting setup (and probably g_LightingType gating)
-		// before it can be revisited, not a quick re-guess.
-		var (_, tint) = ResolveMtdShading(flverMaterial);
+		// g_DiffuseMapColor tint only - NOT roughness. Tried and reverted here (see
+		// docs/ARCHITECTURE.md's "Known deferred work") - needs real environment/lighting
+		// groundwork first, not a quick re-guess.
+		var (_, tint, _) = ResolveMtdShading(flverMaterial);
 		mat.SetShaderParameter("diffuse_tint", tint);
 
 		return mat;
@@ -622,7 +614,7 @@ public partial class FlverModelBuilder : RefCounted
 		// Tint only, not roughness - see BuildLightmapMaterial for why. There's only one
 		// g_DiffuseMapColor per material (no _2 variant), so the tint applies to the
 		// already-blended diffuse1/diffuse2 result, not per-layer.
-		var (_, tint) = ResolveMtdShading(flverMaterial);
+		var (_, tint, _) = ResolveMtdShading(flverMaterial);
 		mat.SetShaderParameter("diffuse_tint", tint);
 
 		return mat;
@@ -684,6 +676,12 @@ public partial class FlverModelBuilder : RefCounted
 	{
 		var p = mtd.Params.FirstOrDefault(x => x.Name == name);
 		return p?.Value is float f ? f : fallback;
+	}
+
+	private static int GetMtdInt(MTD mtd, string name, int fallback)
+	{
+		var p = mtd.Params.FirstOrDefault(x => x.Name == name);
+		return p?.Value is int i ? i : fallback;
 	}
 
 	private static float GetMtdFloat4Alpha(MTD mtd, string name, float fallback)
