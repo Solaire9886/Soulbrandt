@@ -62,10 +62,40 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
    core to the mission above, not a side task.
 2. **Skeleton/animation import** — parsing Demon's Souls' Havok (`.hkx`) animation data
    and building `Skeleton3D`/`AnimationPlayer` from it. The long-stated long-term goal
-   for the importer; nothing has been scoped here yet beyond "this is next."
-3. **Whatever else turns out to be needed for a walkable level** — collision/navmesh
-   data, sound, and any other formats a real level depends on haven't been scoped at all
-   yet. Expect this list to grow as Phase 1 continues; don't treat it as complete. One
+   for the importer. As of 2026-08-18, no longer purely unscoped: a concrete two-source
+   approach exists — an unmerged 2018 branch on our own `SoulsFormatsNEXT` upstream
+   already parses Havok's packfile container format with a DeS-specific variant, extended
+   with hand-coded skeleton/animation classes using a real, GPL-licensed, DeS-specific
+   Python Havok animation parser (`Grimrukh/soulstruct-havok`) as the field-layout/
+   algorithm reference — most notably for DeS's wavelet-compression scheme, which is
+   *not* the same as later titles' spline-compression. See docs/context.md's "Havok/
+   animation ecosystem research" entry for the full trail. **Deliberately still deferred,
+   by explicit decision, not just unstarted:** even with parsing solved, this project has
+   no skeleton/animation runtime at all yet — same "no game logic to plug into" reasoning
+   already applied to `Enemy`/`Player` MSB placement below. Revisit once the graphical
+   side of the importer is largely done.
+3. **Whatever else turns out to be needed for a walkable level** — sound and most other
+   formats a real level depends on haven't been scoped at all yet. Collision/navmesh is a
+   partial exception, found 2026-08-18: `SoulsFormatsNEXT/NVM.cs` already reads DeS
+   navmesh data end to end and is completely unwired (see docs/ARCHITECTURE.md's "Known
+   deferred work") — a much smaller wiring task than assumed, not a missing format. HKX
+   collision-mesh reading also has two known reference implementations now (same
+   docs/context.md entry as above) rather than being an unknown-shape problem, though
+   nothing's wired on our side yet either way. Expect this list to grow as Phase 1
+   continues; don't treat it as complete.
+   Another real, scoped-but-unstarted addition, found 2026-08-17 while searching for
+   shader calibration data (see docs/ARCHITECTURE.md's "Known deferred work" and
+   docs/context.md's "Lightmap/drawparam system, part 13"): a whole `script/` category
+   (real AI/dialogue Lua + FromSoft's `.esd` state-machine format, both already readable
+   via unused `SoulsFormatsNEXT` classes) that this project has never extracted or
+   touched — a genuinely separate future system (game logic, not rendering), not folded
+   into any phase item here yet pending a priority decision. `menu`/`sfx`/`remo`/`msg`
+   are the same story at smaller scale. Separately, that same search confirmed real
+   per-material shader calibration constants (water's tile/scroll/tint tuning, chr/parts
+   specular cubemap values) are **not** recoverable from any game file — the real
+   compiled shader binaries exist and were opened directly, but ship with no
+   parameter-name table — so visual-reference calibration against real screenshots stays
+   the only path for those, not a blocked-on-more-file-access item. One
    concrete addition found while investigating unrelated `obj/` texture questions: **a
    Havok-driven destructible-debris system** (`map/breakobj/*.breakobj`, an undocumented
    FromSoft-specific format, magic header `OBJB`) that a cluster of dummy-only `obj/`
@@ -161,8 +191,10 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
      common case) out to solid white. **Still open:** real Nexus `env_intensity`/
      `env_spc_intensity` values range 1.5x-5x, and the lightmap-scaled env/env_spc terms are
      left unclamped, which overexposes a minority of bright-lightmap surfaces - confirmed via
-     `m0000B0` (Nexus's end-game ground piece, `LightID=3`, `envDif_colA=450` -> `4.5x`):
-     unclamped, its bright open-ground lightmap texels blow past white while shadowed
+     `m0000B0` (the Old One/ending-area ground piece, `LightID=3`, `envDif_colA=450` -> `4.5x`
+     - geometry gated behind beating the game, not present in the regular explorable Nexus hub,
+     so not recapturable via casual RPCS3 play sessions; see docs/context.md's RPCS3 shader
+     capture entries): its bright open-ground lightmap texels blow past white while shadowed
      ruins/crevice texels stay correct, since the env term scales with the lightmap sample
      itself (see the `HemEnvDifSpc` DSR-source entry above/docs/context.md's "Lightmap/drawparam
      system, part 4"). A `[0,1]` clamp (`hemisphere_env_term()`) was tried and reverted the
@@ -172,7 +204,13 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
      global clamp masking it. The real DSR source's `CalcEnvIBL(...)` is a function call, not a
      bare multiply, and almost certainly shapes/normalizes this properly. Revisit once the rest
      of MSB parsing (or at least the lighting-data half) is otherwise done - this is real
-     shader-research, not more data-wiring.
+     shader-research, not more data-wiring. **`ToneMapBank`/`ToneCorrectBank` (2026-08-18) turned
+     out to be a real, adjacent per-map dataset** (`MSBD.Part.ToneMapID`/`ToneCorrectID`, same
+     shape as `LightID`/`FogID`) - reading is wired and kept, but a `WorldEnvironment` built from
+     its real values made things visibly worse (most maps dark, some areas pure black), not
+     better - see docs/ARCHITECTURE.md's "Known deferred work" and docs/context.md's
+     "third-party investigation brief" entry. Confirms the env-term formula gap above is a real
+     understanding gap, not just missing calibration data - more real data alone didn't fix it.
    - **Cutscene/event data lives in `remo/scnAAxxxx.remobnd`** (`AA` = area number, e.g.
      `scn02xxxx` for Boletaria) - each a real, structured multi-cut sequence (camera
      `.sibcam` + Havok `.hkx` animation per cut, plus a `.tae` timed-event file).
