@@ -19,6 +19,14 @@ public partial class DrawParamReader : RefCounted
 
 	public PARAM.Row GetFogBankRow(string blockName, byte fogID) => GetRow(blockName, "fogbank", fogID);
 
+	// MSBD.Part.ToneMapID/ToneCorrectID - same DrawParam-family bank shape as LightID/FogID.
+	// Real, per-part-varying data, see docs/context.md's "third-party investigation brief"
+	// entry. No consumer right now - a WorldEnvironment built from this was tried and reverted
+	// (a real regression, not just uncalibrated).
+	public PARAM.Row GetToneMapBankRow(string blockName, byte toneMapID) => GetRow(blockName, "tonemapbank", toneMapID);
+
+	public PARAM.Row GetToneCorrectBankRow(string blockName, byte toneCorrectID) => GetRow(blockName, "tonecorrectbank", toneCorrectID);
+
 	private PARAM.Row GetRow(string blockName, string bank, byte rowID)
 	{
 		string mapPrefix = blockName[..blockName.IndexOf('_')];

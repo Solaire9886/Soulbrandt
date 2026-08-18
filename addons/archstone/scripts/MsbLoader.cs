@@ -5,7 +5,8 @@ using SoulsFormats;
 namespace Archstone;
 
 public readonly record struct MsbPlacement(string ModelPath, string Name,
-	Vector3 Position, Vector3 RotationDegrees, Vector3 Scale, byte LightID, byte FogID);
+	Vector3 Position, Vector3 RotationDegrees, Vector3 Scale, byte LightID, byte FogID,
+	byte ToneMapID, byte ToneCorrectID);
 
 // Reads a .msb's map-piece placements and resolves each one to a .flver path on disk.
 // No scene-node concerns - see docs/ARCHITECTURE.md's FlverModelBuilder/FlverLoader split, mirrored here.
@@ -81,7 +82,9 @@ public partial class MsbLoader : RefCounted
 				new Vector3(part.Rotation.X, part.Rotation.Y, part.Rotation.Z),
 				new Vector3(part.Scale.X, part.Scale.Y, part.Scale.Z),
 				part.LightID,
-				part.FogID));
+				part.FogID,
+				part.ToneMapID,
+				part.ToneCorrectID));
 		}
 		return placements;
 	}
