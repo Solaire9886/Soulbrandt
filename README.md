@@ -1,10 +1,11 @@
 # Soulbrandt
 
-A native Godot 4 (.NET/C#) asset-import pipeline for **Demon's Souls (PS3)** — reads
-FromSoftware's proprietary formats (FLVER0 meshes, TPF textures, MTD materials) directly
-into Godot resources, no intermediate OBJ/PNG conversion step. This is Phase 1 of a larger
-goal: a full Demon's Souls recreation in Godot that bundles no proprietary game assets,
-relying entirely on each user's own legally-owned copy of the game.
+A native Godot 4 (.NET/C#) asset-import pipeline for Demon's Souls (2009) — reads
+FromSoftware's proprietary formats (FLVER0 meshes, TPF textures, MTD materials, MSB level
+layouts) directly into Godot resources, no intermediate OBJ/PNG conversion step and no
+external unpacking tool. This is Phase 1 of a larger goal: a full Demon's Souls recreation
+in Godot that bundles no proprietary game assets, relying entirely on each user's own
+legally-owned copy of the game.
 
 **No game assets are included in this repo, and none ever will be.** Everything here is
 original code that reads a format; you provide your own copy of the game.
@@ -20,7 +21,7 @@ original code that reads a format; you provide your own copy of the game.
   will.
 - This project does not implement, provide, or document any method of bypassing disc
   encryption or other copy protection. It only reads container/asset formats
-  (BND/DCX/FLVER/TPF) from files you already have — how you obtain an authentic, legal
+  (BND/DCX/FLVER/TPF/MSB) from files you already have — how you obtain an authentic, legal
   copy of your own game is entirely your own responsibility and outside this project's scope.
 - Using this software requires you to own a legitimate dumped copy of Demon's Souls.
   No extraction guides, decryption keys, or pre-extracted files are provided here.
@@ -32,19 +33,36 @@ original code that reads a format; you provide your own copy of the game.
 
 ## What works today
 
-- Native FLVER0 → `ImporterMesh`/`StandardMaterial3D` import (correct coordinate space,
-  winding, UVs — verified against real gameplay footage, not just "looks right in editor")
+- Native FLVER0 → `ArrayMesh`/`MeshInstance3D` import (correct coordinate space, winding,
+  UVs, rigid mesh-to-node binding — verified against real gameplay footage, not just
+  "looks right in editor")
 - Texture resolution across every asset category (`chr`, `map`, `obj`, `parts`), including
-  cross-category texture reuse and per-map-area texture atlases
-- Alpha modes (cutout / soft blend / additive glow) driven by FromSoft's own MTD naming
-  convention
-- Custom shaders for terrain ground-blending and water (reflection/refraction/depth-fade)
-- An in-editor and headless **asset mounting** system: point it at your own raw PS3
-  game directory and it unpacks the game's BND/DCX containers directly, in-process — no
-  external unpacking tool needed
+  cross-category reuse, per-map-area texture atlases, and corrupt/missing-source-data
+  handling
+- Real materials, not placeholders: alpha modes (cutout / soft blend / additive) driven by
+  FromSoft's own MTD naming, chr/parts specular roughness from real per-material data,
+  terrain ground-blending, reflective/refractive water, and lightmapped surfaces using the
+  real DeS shading formula (hemisphere ambient + a lightmap-scaled environment term),
+  confirmed against decompiled DeS shader bytecode, not guessed
+- **MSB level-layout parsing**: map pieces and placed objects/props load at their real
+  positions with real per-instance lighting (each placement resolves its own `LightID` into
+  real `LIGHT_BANK` ambient/environment data), not a shared global guess
+- An in-editor and headless **asset mounting** system: point it at your own raw PS3 game
+  directory and it unpacks the game's BND/DCX containers directly, in-process, from the
+  Archstone editor toolbar — no external unpacking tool needed
+- A manual, on-demand **load workflow** ("Load Model(s)...", "Load Folder...", "Load
+  Map...") instead of Godot's own reimport pipeline — a deliberate architectural choice,
+  see `docs/ARCHITECTURE.md`'s "Standing priority" section for why
 
-See `docs/ARCHITECTURE.md` for the full architecture writeup, `docs/PLAN.md` for the roadmap,
-and `docs/context.md` for the development history behind the trickier decisions.
+See `docs/ARCHITECTURE.md` for the full architecture writeup, `docs/PLAN.md` for the
+roadmap, and `docs/context.md` for the development history behind the trickier decisions.
+
+## Not yet implemented
+
+Skeletal animation, physics/collision, navmesh, and gameplay systems don't exist yet — this
+is still an asset importer, not a game. These are real, scoped gaps tracked in
+`docs/PLAN.md`'s roadmap and `docs/ARCHITECTURE.md`'s "Known deferred work" section, not
+just unlisted TODOs.
 
 ## Contributing
 
@@ -69,8 +87,11 @@ Want to help? See `CONTRIBUTING.md` for the contributor workflow.
    ```
    dotnet build Soulbrandt.csproj
    ```
-3. Open the project in Godot, use the **Mount...** action in the editor toolbar to point
-   it at your own raw game directory, then import.
+3. Open the project in Godot. In the Archstone toolbar: **Mount...** to point it at your
+   own raw game directory, then **Import** (full import, or choose categories).
+4. Still in the Archstone toolbar: **Load Map...** to place a real level with lighting, or
+   **Load Model(s).../Load Folder...** for individual assets. Nothing loads automatically —
+   see `docs/ARCHITECTURE.md`'s "Architecture" section for why.
 
 ## License
 
@@ -84,3 +105,6 @@ combined work is GPLv3 as a whole.
 - [SoulsFormatsNEXT](https://github.com/soulsmods/SoulsFormatsNEXT) and the broader
   [soulsmods](https://github.com/soulsmods) community for reverse-engineering FromSoftware's
   file formats
+- [RPCS3](https://rpcs3.net/) for making it possible to run and study Demon's Souls on PC at
+  all, and for shader-capture tooling that helped confirm this project's own material work
+  against real DeS bytecode
