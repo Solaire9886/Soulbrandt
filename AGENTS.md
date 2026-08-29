@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Operating instructions for any AI coding agent working in this repository; the substantive content lives in `docs/`.
 
 ## Where things live
 
