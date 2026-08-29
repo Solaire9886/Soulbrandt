@@ -1,8 +1,8 @@
 shader_type spatial;
-render_mode unshaded;
+render_mode blend_sub, unshaded;
 
-// "_Alp" lightmapped materials (soft alpha blend, e.g. translucent hair/cloth with baked
-// lighting) - see lightmap.gdshader's header for why this needs its own file.
+// "Sub" lightmapped materials (subtractive decals - blood, ground stains) - see lightmap.gdshader's
+// header for why this needs its own file.
 #include "lightmap_common.gdshaderinc"
 
 void vertex() {

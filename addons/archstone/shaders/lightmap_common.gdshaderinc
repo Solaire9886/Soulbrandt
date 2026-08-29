@@ -13,23 +13,38 @@ uniform sampler2D lightmap : hint_default_white;
 // g_DiffuseMapColor(Power) tint - see FlverModelBuilder.ResolveMtdShading. White = no-op.
 uniform vec3 diffuse_tint : source_color = vec3(1.0);
 
+// g_TexScroll_0, UV units/sec. The lightmap's own UV is deliberately NOT scrolled - it's baked
+// to fixed geometry, only the tiling detail moves.
+uniform vec2 tex_scroll_0 = vec2(0.0);
+
+vec2 scroll_uv(vec2 uv) {
+	return uv + tex_scroll_0 * TIME;
+}
+
 // The real shader shape (hemisphere-ambient floor untouched by the lightmap, lightmap only
 // scaling a secondary env term) lives in hemisphere_ambient.gdshaderinc, shared with
 // terrain_blend.gdshader - see docs/ARCHITECTURE.md's Lightmaps section.
 #include "hemisphere_ambient.gdshaderinc"
+#include "output_stage.gdshaderinc"
 
-// Returns values via out-params rather than assigning ALBEDO/NORMAL_MAP/METALLIC directly -
-// Godot's shader built-ins can only be assigned directly inside fragment() itself, not from a
-// helper function called from it, even a #include-d one only ever called from there.
-void lightmap_shade(vec2 uv, vec2 uv2, out vec3 albedo, out vec3 normal_map_out, out float metallic, out vec3 emission) {
-	vec3 diffuse_color = texture(diffuse, uv).rgb * diffuse_tint;
+// Returns a finished colour, not an ALBEDO/EMISSION surface - these shaders are unshaded.
+// vertex_color (COLOR.rgb) and view_dir are passed in because built-ins aren't readable from a
+// helper. vertex_color goes onto diffuse_color only, not the final colour, so it doesn't scale
+// envSpc - it's a near-universal input in DeS's own shaders (see docs/context.md part 14).
+vec3 lightmap_shade(vec2 uv, vec2 uv2, vec3 vertex_color, vec3 view_dir) {
+	vec2 duv = scroll_uv(uv);
+	vec3 diffuse_color = texture(diffuse, duv).rgb * diffuse_tint * vertex_color;
 	vec3 lm = texture(lightmap, uv2).rgb;
-	float spec = texture(specular, uv).r;
+	float spec = texture(specular, duv).r;
+	vec3 sampled_normal = texture(normal_map, duv).rgb;
 
-	vec3 env = lm * env_color * env_intensity;
+	vec3 pixel_normal = hemisphere_pixel_normal(decode_normal_map(sampled_normal.xy));
 
-	albedo = diffuse_color * (hemisphere_ambient() + env);
-	normal_map_out = texture(normal_map, uv).rgb;
-	metallic = spec;
-	emission = lm * env_spc_color * env_spc_intensity * spec;
+	// Hemisphere floor common to both models; HemDir3 takes directional light, HemEnv takes env.
+	if (lighting_model == LIGHTING_HEM_DIR3) {
+		return diffuse_color * (hemisphere_ambient(pixel_normal) + hemdir3_diffuse(pixel_normal))
+			+ hemdir3_specular(pixel_normal, view_dir, spec);
+	}
+	return diffuse_color * (hemisphere_ambient(pixel_normal) + env_diffuse(pixel_normal, lm))
+		+ env_specular(pixel_normal, view_dir, lm, spec);
 }

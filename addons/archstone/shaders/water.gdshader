@@ -1,5 +1,7 @@
 shader_type spatial;
-render_mode blend_mix, cull_back, diffuse_burley, specular_schlick_ggx;
+// Unshaded: hand-computes a finished colour, and leaving it lit made the editor's preview sun an
+// uncontrolled input. See docs/ARCHITECTURE.md.
+render_mode blend_mix, cull_back, unshaded;
 
 // DeS's water MTD family (g_Bumpmap + g_Envmap only, no diffuse). g_Envmap is a small flat
 // "impression" image, not a cubemap - sampled below as a matcap-style lookup. Wave/reflection
@@ -9,6 +11,10 @@ uniform sampler2D bumpmap : hint_normal;
 uniform sampler2D envmap : source_color;
 uniform sampler2D screen_tex : hint_screen_texture, repeat_disable, filter_linear_mipmap;
 uniform sampler2D depth_tex : hint_depth_texture, repeat_disable, filter_linear_mipmap;
+
+// Water is a map surface - it gets the same per-material atmosphere/tonemap as everything around
+// it. FlverLoader binds these from the same drawparam rows.
+#include "output_stage.gdshaderinc"
 
 uniform vec2 tile_scale_0 = vec2(1.0, 1.0);
 uniform vec2 tile_scale_1 = vec2(1.0, 1.0);
@@ -36,6 +42,12 @@ uniform float water_fade_begin = 0.5;
 // ground truth for what the original shader did with this value.
 uniform float bump_smoose = 1.0;
 
+varying vec3 world_position;
+
+void vertex() {
+	world_position = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+}
+
 void fragment() {
 	// Three independently-tuned bump-texture samples (big waves/mid ripples/fine detail),
 	// linearly blended by weight - ponytail: not a proper renormalized blend, same tradeoff
@@ -51,7 +63,6 @@ void fragment() {
 	float wsum = max(tile_blend_0 + tile_blend_1 + tile_blend_2, 0.001);
 	vec3 tangentNormal = normalize((n0 * tile_blend_0 + n1 * tile_blend_1 + n2 * tile_blend_2) / wsum);
 	tangentNormal = normalize(vec3(tangentNormal.xy * bump_smoose, tangentNormal.z));
-	NORMAL_MAP = tangentNormal * 0.5 + 0.5;
 
 	vec3 N = normalize(TANGENT * tangentNormal.x + BINORMAL * tangentNormal.y + NORMAL * tangentNormal.z);
 
@@ -81,15 +92,11 @@ void fragment() {
 	vec3 refraction = textureLod(screen_tex, SCREEN_UV + refract_offset, 0.0).rgb * water_color;
 	vec3 surface = mix(refraction, water_color, water_alpha * shallow);
 
-	// EMISSION, not ALBEDO: this is a self-contained hand-tuned final color, not a
-	// physically-based surface - with no reflection probe in the scene, routing it through
-	// ALBEDO made it nearly invisible regardless of scene lighting/roughness.
-	EMISSION = mix(surface, reflection, fresnel);
-	ALBEDO = vec3(0.0);
+	// Finished colour into ALBEDO, then the shared output stage - unshaded, so this is the pixel.
+	vec3 camera_position = INV_VIEW_MATRIX[3].xyz;
+	vec3 view_dir = normalize(camera_position - world_position);
+	float view_depth = dot(world_position - camera_position, -INV_VIEW_MATRIX[2].xyz);
+	float view_distance = length(world_position - camera_position);
+	ALBEDO = des_output(mix(surface, reflection, fresnel), view_depth, view_distance, view_dir);
 	ALPHA = 1.0;
-	// ROUGHNESS/SPECULAR from g_ReflectBand - a small *additional* specular sun-glint on top
-	// of the EMISSION-driven look, not the primary reflective effect.
-	float reflectiveness = clamp(reflect_band / 0.1, 0.0, 1.0);
-	ROUGHNESS = mix(0.6, 0.15, reflectiveness);
-	SPECULAR = mix(0.05, 0.5, reflectiveness);
 }

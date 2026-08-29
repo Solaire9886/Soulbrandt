@@ -6,7 +6,7 @@ namespace Archstone;
 
 public readonly record struct MsbPlacement(string ModelPath, string Name,
 	Vector3 Position, Vector3 RotationDegrees, Vector3 Scale, byte LightID, byte FogID,
-	byte ToneMapID, byte ToneCorrectID);
+	byte ToneMapID, byte ToneCorrectID, byte ScatterID);
 
 // Reads a .msb's map-piece placements and resolves each one to a .flver path on disk.
 // No scene-node concerns - see docs/ARCHITECTURE.md's FlverModelBuilder/FlverLoader split, mirrored here.
@@ -84,7 +84,8 @@ public partial class MsbLoader : RefCounted
 				part.LightID,
 				part.FogID,
 				part.ToneMapID,
-				part.ToneCorrectID));
+				part.ToneCorrectID,
+				part.ScatterID));
 		}
 		return placements;
 	}

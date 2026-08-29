@@ -18,7 +18,10 @@ public partial class AssetExtractor : RefCounted
 	// param/paramdef added for LIGHT_BANK/FOG_BANK (see DrawParamReader.cs) - "param" also pulls
 	// the much larger unrelated gameparam/ folder (item/npc data, unused today) since extraction
 	// is whole-top-level-folder granularity; ~8MB total, not worth a sub-folder filter for that.
-	public static readonly string[] KnownCategories = { "chr", "map", "obj", "parts", "mtd", "param", "paramdef" };
+	// "shader" added 2026-08-28 for the material shader library - see ShaderLibrary.cs and
+	// docs/ARCHITECTURE.md's "The shader library" section. Its entry names don't carry the
+	// data/DVDROOT prefix every other container uses, which ResolveEntryOutputPath handles.
+	public static readonly string[] KnownCategories = { "chr", "map", "obj", "parts", "mtd", "param", "paramdef", "shader" };
 
 	// Instance wrapper so GDScript can read this without a second copy in archstone.gd.
 	public string[] GetKnownCategories() => KnownCategories;
@@ -77,14 +80,14 @@ public partial class AssetExtractor : RefCounted
 		if (BND3.IsRead(inner, out var bnd3))
 		{
 			foreach (var entry in bnd3.Files)
-				WriteEntry(entry.Name, entry.Bytes, sourcePath, outputRoot, ref extracted, ref skipped);
+				WriteEntry(entry.Name, entry.Bytes, sourcePath, rawRoot, outputRoot, ref extracted, ref skipped);
 		}
 		else if (BND4.IsRead(inner, out var bnd4))
 		{
 			// Not yet confirmed against a real DeS container (only BND3 observed so far) -
 			// included since SoulsFormatsNEXT already ships it at zero extra cost.
 			foreach (var entry in bnd4.Files)
-				WriteEntry(entry.Name, entry.Bytes, sourcePath, outputRoot, ref extracted, ref skipped);
+				WriteEntry(entry.Name, entry.Bytes, sourcePath, rawRoot, outputRoot, ref extracted, ref skipped);
 		}
 		else if (!ReferenceEquals(raw, inner))
 		{
@@ -102,11 +105,33 @@ public partial class AssetExtractor : RefCounted
 		}
 	}
 
-	private void WriteEntry(string entryName, byte[] bytes, string sourcePath, string outputRoot, ref int extracted, ref int skipped)
+	private void WriteEntry(string entryName, byte[] bytes, string sourcePath, string rawRoot, string outputRoot, ref int extracted, ref int skipped)
 	{
-		string relative = ResolveEntryOutputPath(entryName);
+		string relative = ResolveEntryOutputPath(entryName) ?? FallbackEntryOutputPath(entryName, sourcePath, rawRoot);
 		if (relative == null) return;
 		WriteIfStale(sourcePath, Path.Combine(outputRoot, relative), bytes, ref extracted, ref skipped);
+	}
+
+	// For containers whose entry names aren't data/DVDROOT paths - shader/*.shaderbnd names its
+	// entries by their original build path (N:\DemonsSoul\Source\Shader\DS_Flver\Debug\...),
+	// which carries no on-disk location at all. Mirrors the container's own place in the raw tree
+	// and gives it a folder named after itself, so the 1349 ds_flver entries land in
+	// shader/ds_flver/ and can't collide with ds_filter's identically-shaped names.
+	//
+	// Before this existed, ResolveEntryOutputPath returning null meant such entries were dropped
+	// silently - the reason adding "shader" to KnownCategories alone would have looked like it
+	// worked and produced nothing.
+	private static string FallbackEntryOutputPath(string entryName, string sourcePath, string rawRoot)
+	{
+		string fileName = Path.GetFileName(entryName.Replace('\\', '/'));
+		if (string.IsNullOrEmpty(fileName)) return null;
+		string containerDir = Path.GetDirectoryName(Path.GetRelativePath(rawRoot, sourcePath)) ?? "";
+		// Strip .dcx first: every container ships as both a plain and a .dcx copy, and both
+		// decompress to the same binder - without this they'd land in two folders.
+		string containerFile = Path.GetFileName(sourcePath);
+		if (containerFile.EndsWith(".dcx", StringComparison.OrdinalIgnoreCase))
+			containerFile = containerFile[..^4];
+		return Path.Combine(containerDir, Path.GetFileNameWithoutExtension(containerFile), fileName);
 	}
 
 	private void WriteIfStale(string sourcePath, string destPath, byte[] bytes, ref int extracted, ref int skipped)
@@ -124,6 +149,7 @@ public partial class AssetExtractor : RefCounted
 	// Real BND entry names are full Windows paths (e.g. "N:\...\data\DVDROOT\chr\c2000\c2000.flver")
 	// - dropping the segment right after "data" (always "DVDROOT") and joining the rest lands
 	// every entry at its exact existing on-disk path.
+	// Returns null when the entry name has no data/DVDROOT prefix - see FallbackEntryOutputPath.
 	private static string ResolveEntryOutputPath(string entryName)
 	{
 		var segs = entryName.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
