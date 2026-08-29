@@ -211,6 +211,89 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
      better - see docs/ARCHITECTURE.md's "Known deferred work" and docs/context.md's
      "third-party investigation brief" entry. Confirms the env-term formula gap above is a real
      understanding gap, not just missing calibration data - more real data alone didn't fix it.
+     **Resolved 2026-08-27** (see docs/context.md's dig entry and docs/ARCHITECTURE.md's
+     Known-deferred-work): the regression was a compound (mild whole-frame `Adjustment`
+     darkening plus the `StandardMaterial3D` population's ambient collapsing to near-black with
+     no light nodes in-scene), and the fix order is now clear - give that population a real
+     `LIGHT_BANK`-driven directional-light shader (`g_LightingType=1`/`HemDirDifSpcx3`) before
+     ever adding a `WorldEnvironment` again. The ranked next steps below reflect this.
+   - **Ranked next steps for this lighting thread, established 2026-08-27** (each independently
+     testable, ordered so nothing depends on a later item - see docs/context.md's dig entry for
+     the full evidence): ~~(1) resolve `LIGHT_BANK`'s `envDif`/`envSpc_0..3` cubemap IDs to real
+     `TPF` names, alongside `g_EnvSpcSlotNo`~~ - **done 2026-08-27** (data-only, no consumer);
+     **(2) ~~the hemisphere-diffuse terms (`colA_du`/`colA_dd`)~~ - wired and reverted three times
+     across parts 15 and 32** (flat, flat-with-tonemap, lightmap-gated); the last fixed the
+     contrast but left the scene a uniform beige. The transfer function was a necessary condition,
+     not the missing piece. **Not the lead any more** - do not re-add without genuinely new
+     information. See docs/context.md's parts 15/32/33;
+     ~~(3) per-pixel normals in the lightmap/blend shading math~~ - **done 2026-08-27**,
+     landed together with the env cubemaps as the scoping check required (neither delivers
+     alone); ~~(4) an **in-shader** DeS transfer function~~ - **done 2026-08-27**
+     (`output_stage.gdshaderinc`), and it turned out to be engine-accurate rather than a Godot
+     workaround: DeS ends every material shader with its own exposure step, so in-shader is
+     where it belongs anyway. Landed together with per-material fog and per-channel tone
+     correction as one "output stage" unit, since all three are per-material in the real engine
+     and splitting them would have meant testing a half-built transfer function. (This was
+     expected to unblock (2); it did not - see (2) above.) ~~(5) route
+     `g_LightingType=1` materials onto a real `HemDir3` shader instead of
+     `StandardMaterial3D`+Godot PBR, carrying `LIGHT_BANK`'s three directional lights~~ -
+     **done 2026-08-28**: both lighting models now share one shader family via a
+     `lighting_model` uniform (75 m01 surfaces routed, all binding real directional lights), so
+     the population that rendered black without a `WorldEnvironment` no longer needs one.
+     ~~Still open here: `g_LightingType=3` materials with no lightmap~~ - **also done
+     2026-08-28**, and that was the population actually responsible for the black props (60 of
+     m01's meshes, against only 4 that are `g_LightingType=1`). The unattenuated-`env_intensity`
+     worry was wrong on arithmetic *and* on accuracy - see docs/context.md's "part 25". **The directional trio belongs here and only here**: bytecode shows the map/lightmap
+     (HemEnv) family uses zero directional lights, so adding them to the lightmap shader would be
+     inventing light the engine never applied. Note the family split is approximate - only 83% of
+     lightmap/blend materials are HemEnv - so this needs a real per-material `g_LightingType`
+     gate rather than keying off which builder a material routed to; (6) only then, a block-space post-process
+     pass (tonemap + tone-correct as separately-toggleable stages, since a `CompositorEffect`
+     needs Forward+/Mobile and this project's real-driver check runs Compatibility/`opengl3` - a
+     `hint_screen_texture` shader on a `CanvasLayer` is the viable surface) - note this is now
+     only worth it for the genuinely screen-space stages (bloom, DOF, motion blur), since
+     tonemap and tone-correct already run per-material where the engine runs them;
+     ~~(7) per-material fog fed by `FogID`~~ - **done 2026-08-27**. The atmosphere is
+     **user-accepted as close ("about the closest we can get it for now", 2026-08-28) but not
+     claimed engine-accurate solved** - see docs/context.md's parts 20-33. `FOG_BANK`'s lerp
+     turned out to be the wrong dominant term (real in only 7/183 captured fragment programs) and
+     was dropped from map materials; `LIGHT_SCATTERING_BANK`'s in-scatter is normalized by the
+     **scalar** `1/(lsBetaRay + lsBetaMie)` (the "no divide" ruling of parts 29-30 was reopened -
+     the bytecode has no DIV but applies the phase functions raw, so the divide is CPU-folded into
+     `c108`/`c109`; scalar not per-channel, so hue is untouched); the wavelength weights are
+     lambda^-1.5, fit to the reference ceiling; `scatter_distance_scale` is `3.5e-3`, set so the
+     haze approaches its ceiling by the back of the visible room. Residual gap (map-piece lighting
+     colour) is deferred until this item's screen-space stages exist. Not recommended:
+     re-attempting `Environment.Adjustment*` or a `grayKeyValue → TonemapExposure` mapping in any
+     form, or adding a `WorldEnvironment` before item (4).
+   - **The shader library (`shader/ds_flver.shaderbnd`) is a new, largely untapped information
+     source, opened 2026-08-28** - 1349 named shaders giving the complete lighting-model matrix
+     (`HemDir3`/`HemEnv`/`HemEnvLerp` x point-light counts x shadow variants), a direct
+     authored MTD->shader mapping, and dev-written Japanese descriptions on all 612 MTDs. See
+     docs/ARCHITECTURE.md's "The shader library" section. ~~(a) add `shader` to
+     `AssetExtractor.KnownCategories`~~ and ~~(b) read the names as data~~ - **both done
+     2026-08-28** (`mounted/shader/`, `ShaderLibrary.cs`, 612/612 MTDs resolving). **Still open:
+     (c) disassemble the microcode.** The `.fpo`/`.vpo` are stripped of symbols but the RSX ISA
+     is implemented in RPCS3's own decompiler, so matching compiled shaders against the
+     shaderlog captures would resolve every anonymous `FragmentProgramNNN` to its real name -
+     turning the capture corpus into a named reference, and giving access to the 1215 shipped
+     fragment programs against the 228 ever captured. Parsing, not reverse engineering.
+   - **Two user-reported issues tracked as of 2026-08-28, both no longer active.** **(a)
+     ~~shadowed geometry reads too dark to make out detail~~ - resolved as a byproduct of the
+     atmosphere work: additive in-scatter now genuinely lifts shadowed surfaces, which is also
+     what makes the part-19 pivot contrast form safe to keep (see docs/context.md's part 33). Not
+     separately confirmed by the user as its own item but no longer reported.** **(b) ~~placed
+     props/`Objects` render black without a `WorldEnvironment`~~ - fixed 2026-08-28, see part 25.**
+   - **Deferred (was "current top priority", 2026-08-28): the map's lighting/shading colour is
+     still slightly off vs RPCS3's warmer map-piece tone.** Not a contrast problem - the
+     diffuse-hemi contrast crush is gone with that term, and the pivot black point is covered by
+     the accurate haze at player range (part 33). The `LIGHT_BANK` "diffuse hemisphere" pair
+     (`colA_du`/`colA_dd`) has been wired and
+     reverted three times (parts 15/32) and is **not** the lead - it carries `m01`'s warm tint but
+     every attempt flattened the scene. Per the user (part 33), the map-piece lighting colour may
+     now be *more* accurate than the fog, and the fog is the easier of the two to revisit; both
+     are parked until the screen-space stages of this item exist and there is a full pipeline to
+     judge against. See docs/context.md's parts 32/33 and `.local-notes.md`.
    - **Cutscene/event data lives in `remo/scnAAxxxx.remobnd`** (`AA` = area number, e.g.
      `scn02xxxx` for Boletaria) - each a real, structured multi-cut sequence (camera
      `.sibcam` + Havok `.hkx` animation per cut, plus a `.tae` timed-event file).
