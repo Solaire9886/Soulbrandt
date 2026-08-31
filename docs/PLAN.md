@@ -169,9 +169,10 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
    - **A real `WorldEnvironment`/tonemap/exposure setup belongs here too, not as a
      separate task.** docs/ARCHITECTURE.md's water and lightmap sections both already note that
      brightness/contrast comparisons so far have been against the editor's own opaque
-     default preview lighting, not a controlled baseline, because no `WorldEnvironment`
-     exists anywhere in this project yet - every shader-tuning decision made before this
-     exists is provisional. The assembler is the natural place to build one: it's the
+     default preview lighting, not a controlled baseline, because no ambient/exposure
+     `WorldEnvironment` exists anywhere in this project yet (the glow-only bloom one added
+     2026-08-31 disables ambient and pins linear tonemap) - every shader-tuning decision made
+     before this exists is provisional. The assembler is the natural place to build one: it's the
      first point where a whole real map scene gets assembled (not a single loose test
      mesh loaded by a throwaway script), which is exactly when a scene-level
      `WorldEnvironment` node needs to exist anyway. Building it as part of the assembler,
@@ -265,19 +266,22 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
      haze approaches its ceiling by the back of the visible room. Residual gap (map-piece lighting
      colour) is deferred until this item's screen-space stages exist. Not recommended:
      re-attempting `Environment.Adjustment*` or a `grayKeyValue → TonemapExposure` mapping in any
-     form, or adding a `WorldEnvironment` before item (4).
+     form, or adding an *ambient/reflection* `WorldEnvironment` before item (4). (A glow-only one
+     for bloom was added 2026-08-31 with ambient/reflection disabled — see docs/ARCHITECTURE.md's
+     "Bloom"; that is the bounded exception, not a reopening of this.)
    - **The shader library (`shader/ds_flver.shaderbnd`) is a new, largely untapped information
      source, opened 2026-08-28** - 1349 named shaders giving the complete lighting-model matrix
      (`HemDir3`/`HemEnv`/`HemEnvLerp` x point-light counts x shadow variants), a direct
      authored MTD->shader mapping, and dev-written Japanese descriptions on all 612 MTDs. See
      docs/ARCHITECTURE.md's "The shader library" section. ~~(a) add `shader` to
-     `AssetExtractor.KnownCategories`~~ and ~~(b) read the names as data~~ - **both done
-     2026-08-28** (`mounted/shader/`, `ShaderLibrary.cs`, 612/612 MTDs resolving). **Still open:
-     (c) disassemble the microcode.** The `.fpo`/`.vpo` are stripped of symbols but the RSX ISA
-     is implemented in RPCS3's own decompiler, so matching compiled shaders against the
-     shaderlog captures would resolve every anonymous `FragmentProgramNNN` to its real name -
-     turning the capture corpus into a named reference, and giving access to the 1215 shipped
-     fragment programs against the 228 ever captured. Parsing, not reverse engineering.
+     `AssetExtractor.KnownCategories`~~, ~~(b) read the names as data~~ and ~~(c) disassemble
+     the microcode~~ - **all done** (a/b 2026-08-28; c 2026-08-31 via `tools/RsxShaderMatch`:
+     `.fpo` RSX-microcode decoder + fingerprint matcher + readable disassembler, 363 HIGH-
+     confidence names across 423 captures, 195 distinct shaders identified). The disassembler
+     drove the D5/D6/D7 shader-accuracy fixes and re-identified `HemEnvLerp` as a two-cubemap
+     env-diffuse transition. See `docs/context.md` part 34. **Still open:** vertex-program
+     matching (separate RSX ISA, unstarted) and the `.rrc` RSX Capture route for the scattering
+     constants / a foggy-outdoor curve.
    - **Two user-reported issues tracked as of 2026-08-28, both no longer active.** **(a)
      ~~shadowed geometry reads too dark to make out detail~~ - resolved as a byproduct of the
      atmosphere work: additive in-scatter now genuinely lifts shadowed surfaces, which is also
