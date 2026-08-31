@@ -50,6 +50,8 @@ void fragment() {
 	vec2 uv2 = UV2 + tex_scroll_1 * TIME;
 	vec3 diffuse_color = mix(texture(diffuse1, uv1).rgb, texture(diffuse2, uv2).rgb, blend) * diffuse_tint;
 	vec3 lm = texture(lightmap, lightmap_uv).rgb;
+	// Scalar + untinted, unlike the single-layer family: this family's vertex colour is the
+	// layer-blend weight, not a free multiplier (see the terrain-blend note in docs/ARCHITECTURE.md).
 	float spec = mix(texture(specular1, uv1).r, texture(specular2, uv2).r, blend);
 	// ponytail: linear mix of two tangent-space normal maps, not a proper renormalized blend.
 	vec3 sampled_normal = mix(texture(normal1, uv1).rgb, texture(normal2, uv2).rgb, blend);
@@ -63,6 +65,6 @@ void fragment() {
 
 	// envSpc added straight in, not routed through EMISSION - this shader is unshaded.
 	vec3 color = diffuse_color * (hemisphere_ambient(pixel_normal) + env_diffuse(pixel_normal, lm))
-		+ env_specular(pixel_normal, view_dir, lm, spec);
+		+ env_specular(pixel_normal, view_dir, lm, vec3(spec), vec3(1.0));
 	ALBEDO = des_output(color, view_depth, view_distance, view_dir);
 }

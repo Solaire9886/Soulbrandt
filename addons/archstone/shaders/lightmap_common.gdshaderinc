@@ -35,7 +35,8 @@ vec3 lightmap_shade(vec2 uv, vec2 uv2, vec3 vertex_color, vec3 view_dir) {
 	vec2 duv = scroll_uv(uv);
 	vec3 diffuse_color = texture(diffuse, duv).rgb * diffuse_tint * vertex_color;
 	vec3 lm = texture(lightmap, uv2).rgb;
-	float spec = texture(specular, duv).r;
+	// RGB, not just red - the HemEnv and HemDir3 specular terms use the whole sampled colour.
+	vec3 spec = texture(specular, duv).rgb;
 	vec3 sampled_normal = texture(normal_map, duv).rgb;
 
 	vec3 pixel_normal = hemisphere_pixel_normal(decode_normal_map(sampled_normal.xy));
@@ -43,8 +44,9 @@ vec3 lightmap_shade(vec2 uv, vec2 uv2, vec3 vertex_color, vec3 view_dir) {
 	// Hemisphere floor common to both models; HemDir3 takes directional light, HemEnv takes env.
 	if (lighting_model == LIGHTING_HEM_DIR3) {
 		return diffuse_color * (hemisphere_ambient(pixel_normal) + hemdir3_diffuse(pixel_normal))
-			+ hemdir3_specular(pixel_normal, view_dir, spec);
+			+ hemdir3_specular(pixel_normal, view_dir, spec, vertex_color);
 	}
+	// env-specular takes vertex colour too (the single-layer family's is a free multiplier).
 	return diffuse_color * (hemisphere_ambient(pixel_normal) + env_diffuse(pixel_normal, lm))
-		+ env_specular(pixel_normal, view_dir, lm, spec);
+		+ env_specular(pixel_normal, view_dir, lm, spec, vertex_color);
 }

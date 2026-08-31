@@ -92,11 +92,17 @@ vec3 hemdir3_diffuse(vec3 normal) {
 	return total;
 }
 
-// Blinn-Phong off LIGHT_BANK's spec-only directional (not the three diffuse ones), g_SpecularPower
-// as the exponent directly - nothing here feeds Godot's PBR, so no GGX roughness conversion.
-vec3 hemdir3_specular(vec3 normal, vec3 view_dir, float specular_sample) {
-	vec3 half_vector = normalize(spec_light_direction + view_dir);
-	return spec_light_color * pow(max(dot(normal, half_vector), 0.0), specular_power) * specular_sample;
+// Phong (reflect.L), one lobe per directional light - the HemDir3 bytecode has no half-vector.
+// Weighted by the single spec-only colour (colA_s) and g_SpecularPower directly - nothing here
+// feeds Godot's PBR, so no GGX roughness conversion. spec_light_direction is unused by this
+// variant, kept for the HemDir3Pnt* family. See docs/context.md part 34 for the disassembly.
+vec3 hemdir3_specular(vec3 normal, vec3 view_dir, vec3 specular_sample, vec3 tint) {
+	vec3 reflected = reflect(-view_dir, normal);
+	float lobe = 0.0;
+	for (int i = 0; i < 3; i++) {
+		lobe += pow(max(dot(reflected, dir_light_directions[i]), 0.0), specular_power);
+	}
+	return spec_light_color * lobe * specular_sample * tint;
 }
 
 // Irradiance lookup by the normal itself (not a reflection vector) - the term that carries
@@ -106,8 +112,12 @@ vec3 env_diffuse(vec3 normal, vec3 gate) {
 	return texture(env_dif_cube, normal).rgb * env_color * env_intensity * gate;
 }
 
-// Reflection-vector lookup off the per-pixel normal, weighted by the material's specular map.
-vec3 env_specular(vec3 normal, vec3 view_dir, vec3 gate, float specular_sample) {
+// Reflection-vector lookup off the per-pixel normal. The HemEnv bytecode weights this by the
+// RGB specular sample (not just red) and by vertex colour; `tint` is vec3(1.0) from callers
+// whose vertex-colour channel isn't a free multiplier - terrain_blend's is the layer-blend
+// weight. See docs/context.md part 34.
+vec3 env_specular(vec3 normal, vec3 view_dir, vec3 gate, vec3 specular_sample, vec3 tint) {
 	vec3 reflected = reflect(-view_dir, normal);
-	return texture(env_spc_cube, reflected).rgb * env_spc_color * env_spc_intensity * gate * specular_sample;
+	return texture(env_spc_cube, reflected).rgb * env_spc_color * env_spc_intensity
+		* gate * specular_sample * tint;
 }
