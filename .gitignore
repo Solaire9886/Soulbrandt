@@ -17,3 +17,11 @@ mono_crash.*.json
 # The output directory for extracted copies of DeS, don't EVER remove this!
 # We never bundle proprietary game assets, ever. See docs/ARCHITECTURE.md's "Asset mounting".
 /mounted
+
+# Standalone tool build artifacts. The .uid files are spurious - the Godot editor
+# scans tools/ because it sits under the project root, but RsxShaderMatch is a plain
+# .NET console app (Soulbrandt.csproj excludes tools/**/*.cs) and none of it is a
+# Godot resource.
+tools/**/bin/
+tools/**/obj/
+tools/**/*.uid

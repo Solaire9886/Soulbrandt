@@ -9,6 +9,9 @@
     <!-- SoulsFormatsNEXT is a separate project built via ProjectReference below -
          exclude from Soulbrandt's implicit glob. -->
     <Compile Remove="SoulsFormatsNEXT/**/*.cs" />
+    <!-- tools/ holds standalone research utilities with their own .csproj files;
+         they must not be pulled into the Godot assembly's implicit glob. -->
+    <Compile Remove="tools/**/*.cs" />
   </ItemGroup>
 
   <ItemGroup>
