@@ -34,11 +34,67 @@ public partial class FlverLoader : RefCounted
 	{
 		string blockName = System.IO.Path.GetFileNameWithoutExtension(msbPath);
 		var root = new Node3D { Name = blockName };
+		root.AddChild(BuildBloomEnvironment(blockName));
 		foreach (var placement in _msbLoader.ReadMapPieces(msbPath))
 			root.AddChild(InstantiatePlacement(placement, blockName));
 		foreach (var placement in _msbLoader.ReadObjects(msbPath))
 			root.AddChild(InstantiatePlacement(placement, blockName));
 		return root;
+	}
+
+	// Approximates DeS's bright-pass -> bloom stage. Environment.glow is the only post effect
+	// that shows in the editor's 3D viewport under the Compatibility renderer; every other
+	// Environment feature is pinned off, ambient/reflection specifically so this can't
+	// re-trigger the past near-black regression. See docs/ARCHITECTURE.md's "Bloom" section.
+	private WorldEnvironment BuildBloomEnvironment(string blockName)
+	{
+		var env = new Godot.Environment
+		{
+			BackgroundMode = Godot.Environment.BGMode.Color,
+			BackgroundColor = Colors.Black,
+			AmbientLightSource = Godot.Environment.AmbientSource.Disabled,
+			AmbientLightEnergy = 0.0f,
+			ReflectedLightSource = Godot.Environment.ReflectionSource.Disabled,
+			TonemapMode = Godot.Environment.ToneMapper.Linear,
+			TonemapExposure = 1.0f,
+			TonemapWhite = 1.0f,
+			AdjustmentEnabled = false,
+			SsaoEnabled = false,
+			SsilEnabled = false,
+			SsrEnabled = false,
+			SdfgiEnabled = false,
+			FogEnabled = false,
+			VolumetricFogEnabled = false,
+			GlowEnabled = false,
+		};
+
+		// Row 0 is the map baseline; glow is per-viewport, so per-part bloom isn't expressible.
+		var tone = _drawParamReader.GetToneMapBankRow(blockName, 0);
+		if (tone != null)
+		{
+			// Percent-style like every other DrawParam bank (100 = 1.0).
+			float begin = System.Convert.ToSingle(tone["bloomBegin"].Value) / 100f;
+			float mul = System.Convert.ToSingle(tone["bloomMul"].Value) / 100f;
+			if (mul > 0.0f)
+			{
+				env.GlowEnabled = true;
+				// GlowBloom is the dial that carries the effect on an LDR buffer - the
+				// HDR-threshold path barely contributes - so bloomMul maps straight to it.
+				env.GlowBloom = Mathf.Clamp(mul, 0.0f, 1.0f);
+				// bloomBegin -> HDR threshold for the extra kick on top.
+				env.GlowHdrThreshold = Mathf.Clamp(begin, 0.0f, 0.99f);
+				env.GlowHdrScale = System.Math.Min(1.0f / System.Math.Max(1.0f - env.GlowHdrThreshold, 0.01f), 8.0f);
+				env.GlowIntensity = 1.0f;
+				env.GlowStrength = 1.2f;   // DS_Fil_Bloom is a wide downscaled gaussian
+				env.GlowBlendMode = Godot.Environment.GlowBlendModeEnum.Additive;
+				env.GlowNormalized = false;
+				// Approximate that gaussian with a few mid mip levels, not the full 7-level spread.
+				for (int i = 0; i < 7; i++)
+					env.SetGlowLevel(i, i is 2 or 3 or 4 ? 1.0f : 0.0f);
+			}
+		}
+
+		return new WorldEnvironment { Environment = env, Name = "BloomEnvironment" };
 	}
 
 	private Node3D InstantiatePlacement(MsbPlacement placement, string blockName)
