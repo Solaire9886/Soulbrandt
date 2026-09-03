@@ -6,21 +6,28 @@ them against Demon's Souls' own named shader library.
 Not part of the Godot project. Standalone console app:
 
 ```
-dotnet run --project tools/RsxShaderMatch -- dump     <file.fpo|file.vpo>
-dotnet run --project tools/RsxShaderMatch -- fp       <file.fpo>
-dotnet run --project tools/RsxShaderMatch -- disasm   <file.fpo>
-dotnet run --project tools/RsxShaderMatch -- sweep    <dir> [dir ...]
-dotnet run --project tools/RsxShaderMatch -- match    mounted/shader ~/.cache/rpcs3/shaderlog [--only=FragmentProgramN] [--json=out.json]
-dotnet run --project tools/RsxShaderMatch -- coverage mounted/shader/ds_flver ~/.cache/rpcs3/shaderlog
-dotnet run --project tools/RsxShaderMatch -- verify   mounted/shader/ds_flver ~/.cache/rpcs3/shaderlog
+dotnet run --project tools/RsxShaderMatch -- dump      <file.fpo|file.vpo>
+dotnet run --project tools/RsxShaderMatch -- fp        <file.fpo>
+dotnet run --project tools/RsxShaderMatch -- vp        <file.vpo>
+dotnet run --project tools/RsxShaderMatch -- disasm    <file.fpo|file.vpo>
+dotnet run --project tools/RsxShaderMatch -- sweep     <dir> [dir ...]
+dotnet run --project tools/RsxShaderMatch -- match     mounted/shader ~/.cache/rpcs3/shaderlog [--vertex] [--only=ProgramN] [--json=out.json]
+dotnet run --project tools/RsxShaderMatch -- coverage  mounted/shader ~/.cache/rpcs3/shaderlog [--vertex]
+dotnet run --project tools/RsxShaderMatch -- verify    mounted/shader ~/.cache/rpcs3/shaderlog [--vertex]
+dotnet run --project tools/RsxShaderMatch -- rrc       ~/.config/rpcs3/captures/<frame>.rrc.gz
+dotnet run --project tools/RsxShaderMatch -- rrc-draws ~/.config/rpcs3/captures/<frame>.rrc.gz mounted/shader [--only=N] [--grep=substr]
+dotnet run --project tools/RsxShaderMatch -- rrc-fog   ~/.config/rpcs3/captures/<frame>.rrc.gz
+dotnet run --project tools/RsxShaderMatch -- rrc-mine  ~/.config/rpcs3/captures/<frame>.rrc.gz mounted/shader [--json=out.json]
+dotnet run --project tools/RsxShaderMatch -- rrc-shadow ~/.config/rpcs3/captures/<frame>.rrc.gz mounted/shader
 ```
 
+`--vertex` switches `match`/`verify`/`coverage` to the vertex-program pass (Stage 5).
 For anything that iterates the whole library (a batch of `disasm`), `dotnet publish`
 once and run the exe directly - `dotnet run` per file is ~1 s of startup each.
 
-Outputs: `fragment-names.json` (capture -> library shader name + confidence tier +
-candidates), and `disasm` (readable RSX assembly for any `.fpo`, captured or not).
-Fragment programs only; vertex programs are a separate pass, see "Out of scope".
+Outputs: `fragment-names.json` / `vertex-names.json` (capture -> library shader name +
+confidence tier + candidates), and `disasm` (readable RSX assembly for any `.fpo`/`.vpo`,
+captured or not).
 
 ## Why
 
@@ -43,7 +50,7 @@ is the complete corpus. Captures are a calibration/label set, not the coverage.
 | What | Where | Notes |
 |---|---|---|
 | Named library binaries | `mounted/shader/ds_flver/`, `ds_filter/`, ... | 1421 files, extracted 2026-08-28 |
-| RPCS3 shader-log captures | `~/.cache/rpcs3/shaderlog/` | 257 `FragmentProgramN.spirv` + 141 `VertexProgramN.spirv`; despite the extension they are plain GLSL 450 text |
+| RPCS3 shader-log captures | `~/.cache/rpcs3/shaderlog/` | 423 `FragmentProgramN.spirv` + 212 `VertexProgramN.spirv`; despite the extension they are plain GLSL 450 text |
 | RPCS3 RSX frame capture | `~/.config/rpcs3/captures/BLUS30443_20260817172216_capture.rrc.gz` | one frame, ~37 MB; carries raw microcode **and real CPU constant values** (`c104` etc.) - the source for part 33's unverified scattering constants, a later job |
 | RPCS3 source (ISA reference) | `~/src/rpcs3/rpcs3/Emu/RSX/Program/` | `CgBinaryFragmentProgram.cpp` / `CgBinaryVertexProgram.cpp` are a working RSX FP/VP disassembler; `FragmentProgramDecompiler.cpp` is the full GLSL decompiler that produced the captures |
 
@@ -114,10 +121,11 @@ several GLSL lines).
   and `Sdw`-vs-`Csd` discriminator.
 - FENC / KIL agreement, and material-texture count (name) vs 2D sampler count (capture).
 
-Results against `~/.cache/rpcs3/shaderlog` (257 fragment captures, 1260 library
-programs): **HIGH 208, MED 21, LOW 28, NONE 0**. Written to
-`fragment-names.json` (regenerate with `match ... --json=`). `verify` re-checks four
-hand-verified anchors and exits non-zero on regression:
+Results against the earlier 257-capture shader-log: **HIGH 208, MED 21, LOW 28,
+NONE 0**. The capture set has since grown to 423; `docs/context.md` part 34 has the
+current run (363 HIGH). Written to `fragment-names.json` (regenerate with
+`match ... --json=`). `verify` re-checks hand-verified anchors and exits non-zero on
+regression:
 
 | capture | -> | library shader | why it's certain |
 |---|---|---|---|
@@ -171,19 +179,90 @@ state never triggers it. `context.md` part 18's "lerp toward a constant colour b
 EnvDif cubemap alpha" was wrong on the mechanism (cubemap-to-cubemap, scalar not
 alpha) and came from a differently-numbered capture session anyway.
 
-## Out of scope for now - vertex programs
+## Stage 5 - vertex programs (`--vertex`, done)
 
-The 141 `VertexProgramN.spirv` captures vs the 134 `.vpo` are a separate pass: the
-RSX vertex ISA is different (co-issued vector+scalar ops, no halfword swap, different
-bitfields), so it needs its own decoder ported from `CgBinaryVertexProgram.cpp`. The
-capture side is tractable already - `vs_main()` exposes `read_location(N)` (input
-attributes), `dst_regN` (outputs, incl. `dst_reg6`/`dst_reg15` = the fog `tc8`/`tc9`
-the atmosphere trace cares about) and `_fetch_constant`. Deferred so the fragment
-capability lands as one reviewed unit.
+`RsxVp.cs` decodes RSX vertex microcode - a different ISA from the fragment side:
+co-issued vector (word1 bits 22-26) + scalar (bits 27-31) ops, 16 bytes/instruction,
+**no** halfword swap, `D0..D3`/`SRC` bitfields per `RSXVertexProgram.h`. Ported from
+`CgBinaryDisasm::TaskVP`. Constants are not inlined - a ref is `c[d1.const_src]`, or
+`c[A + n]` when `d3.index_const` is set (the bone-matrix access pattern). Branches
+(BRA/BRI) aren't walked; no ds_flver vpo uses one and `Fingerprint.HasBranch` flags it.
 
-## Later, optional - the .rrc frame capture
+`CaptureVp.cs` reads the same shape out of `vs_main()`: `read_location(N)` = input
+attribute N, `dst_regN` = output register N (`D3.dst`), `_fetch_constant(K)` /
+`_fetch_constant(K + a0.x)` = constant index / relative addressing, plus `exp2(`/`sqrt(`/
+`dot(`/`texture(` counts.
 
-Parse `~/.config/rpcs3/captures/*.rrc.gz` for the real per-draw constant registers,
-to address `context.md` part 33's `[INFERRED]` scattering normalization / fitted
-wavelength weights. Independent of the naming task; sharper now that a named shader
-can be tied to a specific draw.
+`LibVpName.cs` parses the filename (`DS_<fam>_<layout>_<texgen>_<pass>`): a `W` in the
+layout = skinned, trailing `T`s = tangent-frame count, `D`-count / trailing `L` in the
+texgen = diffuse-UV count / lightmap-UV, and `Non`/`Sdw`/`Dep`/`DepAlp` = the pass.
+
+`ScoreVp` leans on the three sets name-stripping leaves intact: **input attributes**
+(header `attributeInputMask` vs `read_location` set - the skinning split lives here),
+**referenced constant indices** (the `D`/`DD`/`DL` texgen split is `c120` alone vs
+`+c121` vs `+c122`), and **output registers**. Plus instr count, `indexed`/`ex2`/`txl`
+agreement.
+
+**`DS_Phn_*` and `DS_Gst_*` vertex programs are byte-identical** (verified by an exact
+`disasm` diff - the ghost effect is entirely fragment-side). `VpCanonical` collapses the
+family token; two candidates that reduce to the same canonical name are reported together,
+not treated as a tie.
+
+Results vs `~/.cache/rpcs3/shaderlog` (212 vertex captures, 161 library vpos):
+**HIGH 143, MED 12, LOW 57, NONE 0**; 28 distinct canonical shaders identified HIGH;
+coverage 34 captured / 108 near / 19 unseen (the unseen tail is Dbg wireframe programs
+and rare `Ghost`/`Water` variants). Written to `vertex-names.json`.
+
+The 57 LOW are genuine ambiguity, not scorer failure - the same kind the fragment pass
+has: many `DS_Fil_*` fullscreen-quad shaders share one trivial passthrough vpo, and the
+`Dep`/`DepAlp` prepass vpos are identical across texgen/tangent variants (a depth pass
+does no UV/tangent work). Those surface as co-equal `candidates` in the JSON.
+
+`verify --vertex` anchors on `VertexProgram1` -> `DS_*_PINT_D_Non` (lit map piece + fog,
+one tangent set, single UV set) and a skinned sibling `DS_*_PIWN_D_Non`.
+
+## Stage 6 - the .rrc frame capture (done)
+
+`RrcCapture.cs` reads RPCS3's `~/.config/rpcs3/captures/*.rrc.gz` - a **whole frame** of the
+RSX FIFO (not one draw), gzip around a `utils::serial` stream (VLE-length-prefixed
+containers, raw-LE PODs, bitwise structs). `frame_capture_data` =
+`{tile_map, memory_map, memory_data_map, display_buffers_map, replay_commands, reg_state}`;
+`reg_state` (the ~74 KB tail) is left unparsed. Validated first try - parses to within 74 KB
+of EOF on a 632 MB frame in 4.5 s. **A reader, not a recorder**: the `.rrc` is already on
+disk, no RPCS3 hook.
+
+`rrc` prints a summary (draw count, method-register histogram). `rrc-draws` (with a
+`mounted/shader` library dir) replays the FIFO - tracking `SET_SHADER_PROGRAM`,
+`SET_TRANSFORM_PROGRAM[_LOAD]`, `SET_TRANSFORM_CONSTANT[_LOAD]` - and at each `DRAW_*` hands
+the bound FP/VP microcode to the same decoders + matcher and dumps the 468 vertex constant
+registers. On a Nexus frame: 1724 draws, **FP 99.6 % HIGH-named, 0 FP ucode unresolved**.
+
+FIFO details in `RrcCapture.cs`; the draw-state replay (including that
+`capture_draw_memory` attaches the FP bytes to the *following* `SET_BEGIN_END(0)`) in
+`RrcInterp.cs`.
+
+**First result:** ran on four outdoor areas (Nexus, Boletaria 1-1, Stonefang 2-1, Shrine
+4-1). The scattering block `c103..c115` came out per-area; `c108`/`c109` are per-channel with
+ratios stable to 3 sig figs across all four (Rayleigh 1:1.30:1.87, Mie 1:1.69:3.50). That
+replaced `output_stage.gdshaderinc`'s fitted `lambda^-1.5` Rayleigh weight and added the
+missing Mie weight - see `docs/context.md` part 35.
+
+`rrc-mine` is the "finished interpreter" pass: `RrcInterp` also tracks `SET_SURFACE_FORMAT`/
+`_CLIP` (RT size + depth format), `SET_SURFACE_COLOR_TARGET`, `SET_COLOR_MASK`, `SET_DEPTH_MASK`,
+`SET_VIEWPORT_*`. It classifies each draw's pass (COLOR / DEPTH / SHADOW = depth-only + square
+RT) and attributes every constant register to the **VP microcode that references it**
+(`ConstRefs`, not upload history), per-frame vs per-draw, plus the FP inline constants per
+shader group. Across eight captures: shadows go to a 2048x2048 Z24S8 surface as 4x 1024x1024
+tiles; the light matrices are `c[0..3]` (cast) and `c[112..115]` (`*_Sdw` receive). See
+`docs/context.md` part 37.
+
+`rrc-shadow` is the focused follow-up: it dumps the SHADOW-pass viewport tiles (origin+extent
+within the 2048² surface), the distinct `c[0..3]` cast matrix per tile, the frame-constant
+registers every `*_Sdw`/`*Csd` receiver references, and the `Sdw` fragment inline constants
+laid out 4-per-row as candidate matrices. Established DeS's shadows as 4-split PSSM in a 2×2
+1024² atlas — see `docs/context.md` part 37 and `docs/PLAN.md`'s shadow item.
+
+`rrc-fog` replays a frame tracking `SET_FOG_MODE`/`SET_FOG_PARAMS` and, per draw, whether the
+bound FP reads input attribute `FOGC` (`RsxFp.Fingerprint.InputMask` bit 3). Across eight
+captures: fog methods never issued, 0 of ~22 000 draws read `FOGC`. RSX fixed-function fog is
+unused by DeS - `des_fog()` models a dead mechanism. See `docs/context.md` part 36.

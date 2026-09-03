@@ -77,8 +77,10 @@ static class RsxFp
         IReadOnlyList<(string Op, int Unit)> TextureSequence,
         IReadOnlyList<int> TextureUnits,
         IReadOnlyList<int> UnitRun,
-        IReadOnlyDictionary<string, int> OpHistogram)
+        IReadOnlyDictionary<string, int> OpHistogram,
+        int InputMask)                                    // bit i set => f[InputRegs[i]] is read (bit 3 = FOGC)
     {
+        public bool ReadsFog => (InputMask & (1 << 3)) != 0;
         public string TexKey => string.Join(",", TextureSequence.Select(t => $"{t.Op}{t.Unit}"));
         public string UnitKey => string.Join(",", TextureUnits);
         public string UnitRunKey => string.Join(",", UnitRun);
@@ -90,6 +92,7 @@ static class RsxFp
         int slots = 0;
         int off = 0;
         int constIndex = 0;
+        int inputMask = 0;
 
         while (off + 16 <= ucode.Length)
         {
@@ -111,6 +114,11 @@ static class RsxFp
             bool end = (w0 & 0x1) != 0;
 
             bool hasConst = (w1 & 0x3) == 2 || (w2 & 0x3) == 2 || (w3 & 0x3) == 2;
+
+            // An instruction that sources any input attribute (reg_type == 1) names it once, in
+            // OPDEST bits [13..16] - RPCS3's InputAttr() reads it the same way.
+            if ((w1 & 0x3) == 1 || (w2 & 0x3) == 1 || (w3 & 0x3) == 1)
+                inputMask |= 1 << (int)((w0 >> 13) & 0xF);
 
             float[]? konst = null;
             int thisConstIdx = -1;
@@ -164,7 +172,8 @@ static class RsxFp
             TextureSequence: texSeq,
             TextureUnits: texSeq.Select(t => t.Item2).Distinct().OrderBy(x => x).ToList(),
             UnitRun: unitRun,
-            OpHistogram: histogram);
+            OpHistogram: histogram,
+            InputMask: inputMask);
 
         return (instrs, fp);
     }

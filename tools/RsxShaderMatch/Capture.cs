@@ -75,6 +75,32 @@ sealed class Capture
         };
     }
 
+    /// Build from decoded RSX fragment microcode (an .rrc draw) rather than shaderlog GLSL.
+    /// The microcode carries the texture-unit run, inline-constant count and KIL/FENC, but
+    /// not sampler types - those come from RSX texture-control state, not decoded here. The
+    /// DeS unit conventions the fingerprint work established stand in: unit 11/13 = env
+    /// cubemap, unit 7 = shadow map. Cruder than the GLSL path, but the unit-run and
+    /// constant-count still carry the match, and for an .rrc draw the value is the constants.
+    public static Capture FromRsxFp(RsxFp.Fingerprint fp)
+    {
+        var samplers = fp.TextureUnits
+            .Select(u => (Type: u is 11 or 13 ? "samplerCube" : u == 7 ? "sampler2DShadow" : "sampler2D", Unit: u))
+            .ToList();
+        return new Capture
+        {
+            Name = "<rrc>",
+            Path = "",
+            Samplers = samplers,
+            TextureSequence = fp.TextureSequence.Select(t => (Call: t.Op, t.Unit)).ToList(),
+            TextureUnits = fp.TextureUnits.ToList(),
+            UnitRun = fp.UnitRun.ToList(),
+            ConstCount = fp.ConstCount,
+            HasKil = fp.HasKil,
+            HasFenc = fp.HasFenc,
+            BodyLines = fp.InstrCount,
+        };
+    }
+
     public string UnitRunKey => string.Join(",", UnitRun);
     public string UnitSetKey => string.Join(",", TextureUnits);
 
