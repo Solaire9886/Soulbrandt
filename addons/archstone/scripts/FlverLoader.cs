@@ -30,6 +30,20 @@ public partial class FlverLoader : RefCounted
 		return root;
 	}
 
+	// "Load Model(s)"/"Load Folder": there's no MSB placement to resolve a LightID from, so
+	// bind default_lightbank.param row 0 (and the default tone/scatter rows) the same way
+	// ApplyDrawParams binds a placement's real rows. Without this a lightmap/hemisphere-family
+	// material renders on shader defaults - flat diffuse * vertex_color * 0.3, every
+	// directional/env term zero. DrawParamReader splits "<prefix>_..." on the first
+	// underscore and treats "default" as its own fallback namespace; a default MsbPlacement is
+	// all-zero IDs, i.e. row 0 of each default_* bank. See docs/ARCHITECTURE.md's "Known deferred work".
+	public Node3D InstantiateWithDefaultDrawParams(string path)
+	{
+		var inst = Instantiate(path);
+		ApplyDrawParams(inst, "default_", default);
+		return inst;
+	}
+
 	public Node3D InstantiateMap(string msbPath)
 	{
 		string blockName = System.IO.Path.GetFileNameWithoutExtension(msbPath);

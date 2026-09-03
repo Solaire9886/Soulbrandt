@@ -340,7 +340,7 @@ func _load_models(res_paths: Array[String]) -> void:
 		return
 
 	for path in res_paths:
-		var inst: Node3D = _loader.Instantiate(path)
+		var inst: Node3D = _loader.InstantiateWithDefaultDrawParams(path)
 		target.add_child(inst)
 		_set_owner_recursive(inst, target.owner if target.owner else target)
 
