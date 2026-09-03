@@ -95,8 +95,7 @@ void fragment() {
 	// Finished colour into ALBEDO, then the shared output stage - unshaded, so this is the pixel.
 	vec3 camera_position = INV_VIEW_MATRIX[3].xyz;
 	vec3 view_dir = normalize(camera_position - world_position);
-	float view_depth = dot(world_position - camera_position, -INV_VIEW_MATRIX[2].xyz);
 	float view_distance = length(world_position - camera_position);
-	ALBEDO = des_output(mix(surface, reflection, fresnel), view_depth, view_distance, view_dir);
+	ALBEDO = des_output(mix(surface, reflection, fresnel), view_distance, view_dir);
 	ALPHA = 1.0;
 }

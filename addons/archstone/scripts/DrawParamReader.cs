@@ -4,9 +4,11 @@ using SoulsFormats;
 
 namespace Archstone;
 
-// Resolves DeS's per-map LIGHT_BANK/FOG_BANK drawparam rows (param/drawparam/<map>_<bank>.param)
-// by row ID - MSBD's per-part LightID/FogID byte indexes directly into these. See
-// docs/ARCHITECTURE.md's "Known deferred work" for the row shape / field names.
+// Resolves DeS's per-map drawparam rows (param/drawparam/<map>_<bank>.param) by row ID - MSBD's
+// per-part LightID/ToneMapID/ToneCorrectID/ScatterID bytes index directly into these. See
+// docs/ARCHITECTURE.md's "Known deferred work" for the row shape / field names. (FOG_BANK is
+// parsed but not wired - it describes RSX fixed-function fog, which DeS never uses; see
+// docs/context.md part 36.)
 public partial class DrawParamReader : RefCounted
 {
 	// Observed sentinel for "unset, use the default bank" - see docs/PLAN.md's Phase 1 item 4.
@@ -17,9 +19,7 @@ public partial class DrawParamReader : RefCounted
 
 	public PARAM.Row GetLightBankRow(string blockName, byte lightID) => GetRow(blockName, "lightbank", lightID);
 
-	public PARAM.Row GetFogBankRow(string blockName, byte fogID) => GetRow(blockName, "fogbank", fogID);
-
-	// MSBD.Part.ToneMapID/ToneCorrectID - same DrawParam-family bank shape as LightID/FogID.
+	// MSBD.Part.ToneMapID/ToneCorrectID - same DrawParam-family bank shape as LightID.
 	// Real, per-part-varying data, see docs/context.md's "third-party investigation brief"
 	// entry. No consumer right now - a WorldEnvironment built from this was tried and reverted
 	// (a real regression, not just uncalibrated).
@@ -27,10 +27,10 @@ public partial class DrawParamReader : RefCounted
 
 	public PARAM.Row GetToneCorrectBankRow(string blockName, byte toneCorrectID) => GetRow(blockName, "tonecorrectbank", toneCorrectID);
 
-	// MSBD.Part.ScatterID -> LIGHT_SCATTERING_BANK, the other half of DeS's atmosphere alongside
-	// FOG_BANK. Its fields are Hoffman & Preetham's real-time outdoor-scattering model under the
-	// paper's own names (lsBetaRay/lsBetaMie/lsHGg/inscatteringMul/distanceMul) - see
-	// output_stage.gdshaderinc's des_scatter.
+	// MSBD.Part.ScatterID -> LIGHT_SCATTERING_BANK, which carries DeS's entire outdoor atmosphere
+	// (FOG_BANK, the RSX-fog bank, is unused - see above). Its fields are Hoffman & Preetham's
+	// real-time outdoor-scattering model under the paper's own names (lsBetaRay/lsBetaMie/lsHGg/
+	// inscatteringMul/distanceMul) - see output_stage.gdshaderinc's des_scatter.
 	public PARAM.Row GetScatterBankRow(string blockName, byte scatterID) => GetRow(blockName, "lightscatteringbank", scatterID);
 
 	// LIGHT_BANK's envDif/envSpc_0..3 are integer *suffixes*, not resource IDs needing a lookup

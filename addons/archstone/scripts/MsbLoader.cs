@@ -4,6 +4,9 @@ using SoulsFormats;
 
 namespace Archstone;
 
+// The five DrawParam IDs are copied verbatim from MSBD.Part. FogID has no consumer - FOG_BANK
+// selects RSX fixed-function fog, which DeS never uses (docs/context.md part 36) - but it's kept
+// so the record stays a faithful mirror of the part structure.
 public readonly record struct MsbPlacement(string ModelPath, string Name,
 	Vector3 Position, Vector3 RotationDegrees, Vector3 Scale, byte LightID, byte FogID,
 	byte ToneMapID, byte ToneCorrectID, byte ScatterID);

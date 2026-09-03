@@ -5,16 +5,13 @@
 // docs/context.md parts 18-33.
 //
 // Uniform defaults are the neutral no-op case plus tonemapbank.paramdef's defaults; FlverLoader
-// overrides them per placement from the FogID/ToneMapID/ToneCorrectID/ScatterID banks.
-
-// FOG_BANK. fogBeginZ/fogEndZ are view-space distances; degRotW is a 0-1000 density dial
-// (100 = normal, 0 = off); colA a percent-style colour multiplier. Wired but not applied - see
-// des_output.
-uniform vec3 fog_color : source_color = vec3(1.0);
-uniform float fog_intensity = 1.0;
-uniform float fog_begin = 0.0;
-uniform float fog_end = 0.0;
-uniform float fog_density = 0.0;
+// overrides them per placement from the ToneMapID/ToneCorrectID/ScatterID banks.
+//
+// FOG_BANK is deliberately not represented here. It describes RSX fixed-function fog, and a
+// frame-capture sweep (docs/context.md part 36) proved Demon's Souls never uses that path -
+// SET_FOG_PARAMS is never issued and no shader in the corpus reads f[FOGC]. The atmosphere on
+// every outdoor surface is the scattering term below. (A separate hand-rolled per-material
+// distance ramp exists in ~7 of 183 scattering shaders; its constants are still unrecovered.)
 
 // LIGHT_SCATTERING_BANK (MSBD.Part.ScatterID). The dominant atmosphere term on most Nexus
 // geometry - see des_scatter.
@@ -48,20 +45,15 @@ uniform vec3 tone_contrast = vec3(1.0);
 uniform float tone_saturation = 1.0;
 uniform float tone_hue_radians = 0.0;
 
-float des_fog_distance(float view_depth) {
-	return clamp((view_depth - fog_begin) / max(fog_end - fog_begin, 0.0001), 0.0, 1.0);
-}
-
-vec3 des_fog(vec3 color, float view_depth) {
-	return mix(color, fog_color * fog_intensity, clamp(des_fog_distance(view_depth) * fog_density, 0.0, 1.0));
-}
-
-// Rayleigh extinction is wavelength-dependent (hence a vec3 transmittance). Weights normalized to
-// mean 1 so lsBetaRay stays the mean rate. Exponent is lambda^-1.5, fit to the reference frame's
-// measured in-scatter ceiling (B/R ~1.56) - since a scalar divide and the distance scale can't
-// move a channel ratio, the ceiling hue is set by these weights alone. See docs/context.md
-// parts 30-31.
-const vec3 RAYLEIGH_WAVELENGTH_WEIGHTS = vec3(0.786, 0.957, 1.258);
+// Per-channel scattering coefficients: both terms are wavelength-dependent in DeS. Weights are the
+// c109 (Rayleigh) and c108 (Mie) vertex-constant channel ratios measured from RSX frame captures
+// across the Nexus, Boletaria, Stonefang and Shrine - stable to 3 sig figs in every area (Rayleigh
+// B/R 1.87, Mie B/R 3.50), so they are the engine's real values, not a screenshot fit. Each is
+// mean-normalized so lsBetaRay/lsBetaMie stay the mean rate and this is a hue correction only. The
+// prior Rayleigh weight was lambda^-1.5 fit to a *tonemapped* reference (B/R ~1.56, compressed);
+// the pre-tonemap coefficient is steeper. Mie had no weight before. See docs/context.md part 35.
+const vec3 RAYLEIGH_WAVELENGTH_WEIGHTS = vec3(0.719, 0.935, 1.347);
+const vec3 MIE_WAVELENGTH_WEIGHTS = vec3(0.485, 0.818, 1.697);
 
 // 3/(16*pi) and 1/(4*pi), the phase-function normalizers.
 float rayleigh_phase(float cos_theta) {
@@ -82,18 +74,19 @@ float henyey_greenstein_phase(float cos_theta, float g) {
 //
 // The in-scatter sum is divided by the *scalar* (lsBetaRay + lsBetaMie) - H&P's normalization
 // with the authored coefficients as scalars. The bytecode has no DIV, but it applies the phase
-// functions raw, so the normalization is CPU-folded into c108/c109 and invisible to capture.
-// Scalar, not the per-channel beta_total vector: per-channel cancels the wavelength split
-// (rejected in part 27), scalar only rescales brightness. See docs/context.md part 33.
+// functions raw, so the normalization is CPU-folded into c108/c109. The measured c108/c109 keep a
+// clean wavelength ratio (a scalar fold leaves ratios untouched), which confirms the fold is
+// scalar - so the divide stays scalar here. See docs/context.md parts 33 and 35.
 vec3 des_scatter(vec3 color, float view_distance, vec3 view_dir) {
 	vec3 beta_ray = RAYLEIGH_WAVELENGTH_WEIGHTS * scatter_beta_ray;
-	vec3 beta_total = beta_ray + vec3(scatter_beta_mie);
+	vec3 beta_mie = MIE_WAVELENGTH_WEIGHTS * scatter_beta_mie;
+	vec3 beta_total = beta_ray + beta_mie;
 	// exp2, not exp - the real instruction is EX2, which folds a factor of ln2 into the scale.
 	vec3 fex = exp2(-beta_total * view_distance * scatter_distance_mul * scatter_distance_scale);
 
 	float cos_theta = dot(-view_dir, scatter_sun_dir);
 	vec3 inscatter = (beta_ray * rayleigh_phase(cos_theta)
-			+ scatter_beta_mie * henyey_greenstein_phase(cos_theta, scatter_hg_g))
+			+ beta_mie * henyey_greenstein_phase(cos_theta, scatter_hg_g))
 		/ max(scatter_beta_ray + scatter_beta_mie, 0.0001)
 		* scatter_sun_color * scatter_sun_intensity * scatter_reflectance * scatter_inscatter_mul;
 
@@ -131,10 +124,9 @@ vec3 des_tone_correct(vec3 color) {
 	return clamp(des_hue_rotate(color, tone_hue_radians), 0.0, 1.0);
 }
 
-// view_depth is planar (FOG_BANK's fogBeginZ/fogEndZ are Z distances); view_distance is radial
-// (scattering). Both passed in because INV_VIEW_MATRIX isn't readable from a helper function.
-// des_fog() is not called - the captured corpus applies it in only 7 of 183 scattering-carrying
-// programs, all unlit, so a blanket per-pixel lerp was wrong. See docs/context.md part 28.
-vec3 des_output(vec3 color, float view_depth, float view_distance, vec3 view_dir) {
+// view_distance is the radial camera distance (for the scattering exponent); view_dir is the
+// normalized world-space fragment->camera direction. Both passed in because INV_VIEW_MATRIX
+// isn't readable from a helper function.
+vec3 des_output(vec3 color, float view_distance, vec3 view_dir) {
 	return des_tone_correct(des_tonemap(des_scatter(color, view_distance, view_dir)));
 }

@@ -127,7 +127,7 @@ public partial class FlverLoader : RefCounted
 		return inst;
 	}
 
-	// Per-instance drawparam uniforms, resolved from this placement's own LightID/FogID/
+	// Per-instance drawparam uniforms, resolved from this placement's own LightID/ScatterID/
 	// ToneMapID/ToneCorrectID rather than the shared default_*.param row-0 fallback every
 	// lightmapped material's base mesh material otherwise uses. Covers both halves of the
 	// pipeline: the shading inputs (hemisphere_ambient.gdshaderinc) and the output stage
@@ -143,8 +143,7 @@ public partial class FlverLoader : RefCounted
 			return;
 
 		// Each may be null when a map ships no such bank - the shader defaults are the neutral
-		// no-op case (no fog, identity correction), so a missing bank simply skips that stage.
-		var fogRow = _drawParamReader.GetFogBankRow(blockName, placement.FogID);
+		// no-op case (identity correction), so a missing bank simply skips that stage.
 		var toneMapRow = _drawParamReader.GetToneMapBankRow(blockName, placement.ToneMapID);
 		var toneCorrectRow = _drawParamReader.GetToneCorrectBankRow(blockName, placement.ToneCorrectID);
 		var scatterRow = _drawParamReader.GetScatterBankRow(blockName, placement.ScatterID);
@@ -198,7 +197,6 @@ public partial class FlverLoader : RefCounted
 			}
 			if (wantsOutputStage)
 			{
-				ApplyFogBank(material, fogRow);
 				ApplyToneBanks(material, toneMapRow, toneCorrectRow);
 				ApplyScatterBank(material, scatterRow);
 			}
@@ -278,19 +276,6 @@ public partial class FlverLoader : RefCounted
 		material.SetShaderParameter("spec_light_direction", SunDirection(
 			System.Convert.ToSingle(row["degRotX_s"].Value),
 			System.Convert.ToSingle(row["degRotY_s"].Value)));
-	}
-
-	// FOG_BANK -> output_stage.gdshaderinc's fog uniforms. degRotW and colA are both the
-	// percent-style 0-1000 scales the paramdef describes (100 = 1.0x); degRotZ is flagged dummy
-	// in the paramdef itself and is not a rotation, despite the name.
-	private static void ApplyFogBank(ShaderMaterial material, PARAM.Row row)
-	{
-		if (row == null)
-			return;
-		ApplyColorIntensity(material, row, "colR", "colG", "colB", "colA", "fog_color", "fog_intensity");
-		material.SetShaderParameter("fog_begin", System.Convert.ToSingle(row["fogBeginZ"].Value));
-		material.SetShaderParameter("fog_end", System.Convert.ToSingle(row["fogEndZ"].Value));
-		material.SetShaderParameter("fog_density", System.Convert.ToSingle(row["degRotW"].Value) / 100f);
 	}
 
 	// TONE_MAP_BANK/TONE_CORRECT_BANK -> output_stage.gdshaderinc's transfer function.

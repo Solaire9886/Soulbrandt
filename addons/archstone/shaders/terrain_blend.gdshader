@@ -58,13 +58,11 @@ void fragment() {
 	vec3 pixel_normal = hemisphere_pixel_normal(decode_normal_map(sampled_normal.xy));
 	vec3 camera_position = INV_VIEW_MATRIX[3].xyz;
 	vec3 view_dir = normalize(camera_position - world_position);
-	// Planar view depth, the units FOG_BANK's fogBeginZ/fogEndZ are in.
-	float view_depth = dot(world_position - camera_position, -INV_VIEW_MATRIX[2].xyz);
-	// Radial, not planar - the scattering model uses the true camera distance.
+	// Radial camera distance - the scattering model uses the true distance, not a planar depth.
 	float view_distance = length(world_position - camera_position);
 
 	// envSpc added straight in, not routed through EMISSION - this shader is unshaded.
 	vec3 color = diffuse_color * (hemisphere_ambient(pixel_normal) + env_diffuse(pixel_normal, lm))
 		+ env_specular(pixel_normal, view_dir, lm, vec3(spec), vec3(1.0));
-	ALBEDO = des_output(color, view_depth, view_distance, view_dir);
+	ALBEDO = des_output(color, view_distance, view_dir);
 }
