@@ -21,7 +21,11 @@ public partial class AssetExtractor : RefCounted
 	// "shader" added 2026-08-28 for the material shader library - see ShaderLibrary.cs and
 	// docs/ARCHITECTURE.md's "The shader library" section. Its entry names don't carry the
 	// data/DVDROOT prefix every other container uses, which ResolveEntryOutputPath handles.
-	public static readonly string[] KnownCategories = { "chr", "map", "obj", "parts", "mtd", "param", "paramdef", "shader" };
+	// "sfx" added 2026-09-06 for particle-effect definitions - see SfxLoader.cs and
+	// docs/ARCHITECTURE.md's SFX entry. Its entry names carry "Sfx" itself (not a generic
+	// DVDROOT placeholder) right after "data", so it needs the same container-qualified
+	// fallback path shader's entries do - see ResolveEntryOutputPath.
+	public static readonly string[] KnownCategories = { "chr", "map", "obj", "parts", "mtd", "param", "paramdef", "shader", "sfx" };
 
 	// Instance wrapper so GDScript can read this without a second copy in archstone.gd.
 	public string[] GetKnownCategories() => KnownCategories;
@@ -155,6 +159,12 @@ public partial class AssetExtractor : RefCounted
 		var segs = entryName.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
 		int dataIdx = Array.FindIndex(segs, s => s.Equals("data", StringComparison.OrdinalIgnoreCase));
 		if (dataIdx < 0 || dataIdx + 2 > segs.Length) return null;
+		// sfx/*.ffxbnd entries are "data/Sfx/OutputData/.../fNNNNNNN.ffx" - "Sfx" here is the real
+		// category, not a generic DVDROOT placeholder, and every bank shares the same internal tree
+		// (.../Effect/f0000512.ffx exists in both main and commoneffects, as a genuinely different
+		// effect - docs/context.md part 57/58) - resolving by this path alone would silently
+		// collide entries from different banks. Bail to the container-qualified fallback instead.
+		if (segs[dataIdx + 1].Equals("Sfx", StringComparison.OrdinalIgnoreCase)) return null;
 		return string.Join('/', segs[(dataIdx + 2)..]);
 	}
 }
