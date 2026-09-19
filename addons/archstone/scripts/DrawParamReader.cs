@@ -27,37 +27,58 @@ public partial class DrawParamReader : RefCounted
 
 	public PARAM.Row GetToneCorrectBankRow(string blockName, byte toneCorrectID) => GetRow(blockName, "tonecorrectbank", toneCorrectID);
 
-	// MSBD.Part.ScatterID -> LIGHT_SCATTERING_BANK, which carries DeS's entire outdoor atmosphere
-	// (FOG_BANK, the RSX-fog bank, is unused - see above). Its fields are Hoffman & Preetham's
-	// real-time outdoor-scattering model under the paper's own names (lsBetaRay/lsBetaMie/lsHGg/
-	// inscatteringMul/distanceMul) - see output_stage.gdshaderinc's des_scatter.
+	// MSBD.Part.ScatterID -> LIGHT_SCATTERING_BANK, which carries DeS's entire outdoor atmosphere.
+	// Its fields are Hoffman & Preetham's real-time outdoor-scattering model under the paper's own
+	// names (lsBetaRay/lsBetaMie/lsHGg/inscatteringMul/distanceMul) - see output_stage.gdshaderinc's
+	// des_scatter.
 	public PARAM.Row GetScatterBankRow(string blockName, byte scatterID) => GetRow(blockName, "lightscatteringbank", scatterID);
 
-	// LIGHT_BANK's envDif/envSpc_0..3 are integer *suffixes*, not resource IDs needing a lookup
-	// table: each map ships its own cubemaps in map/<mXX>/<mXX>_9999.tpf as real
-	// TPF.TexType.Cubemap entries named EnvDif_<mXX>_<NNN>/EnvSpc_<mXX>_<NNN>, zero-padded to 3
-	// digits. Verified against every LIGHT_BANK row actually referenced by an MSB part:
-	// 930/930 resolve, 0 missing. Case-insensitively - the corpus ships envdif_m08_100 lowercase
-	// and Envspc_m06_014 mixed-case, which costs nothing since texture lookups are already
-	// OrdinalIgnoreCase throughout this project.
+	// MSBD.Part.FogID -> FOG_BANK. NOT RSX fixed-function fog (that path is dead - SET_FOG_PARAMS is
+	// never issued, docs/context.md part 36). This bank's colour (col/255 * colA/100), begin/end
+	// distance and degRotW (a master-strength dial, /100) drive the hand-rolled per-material
+	// distance fade in output_stage.gdshaderinc's des_fog - the `mix()` that sits two instructions
+	// ahead of `result*tc8 + tc9` in every HemEnv fragment program. Constants verified against this
+	// bank on m01/m02/m03/m06. See docs/context.md part 45.
 	//
-	// Deliberately name-resolution only, with no consumer yet - the same way ToneMapID/
-	// ToneCorrectID were landed. The resolution rule was the genuinely unknown part (previously
-	// recorded as "per-map resolution isn't confirmed" in docs/ARCHITECTURE.md); how a cubemap
-	// should actually reach a material is a separate, unsettled question - StandardMaterial3D
-	// has no cubemap slot, and the last time reflection response was added with nothing real to
-	// reflect it regressed every map surface (see the roughness revert in that same doc).
+	// A standalone-loaded model (blockName "default_") has no MSB placement, so no FogID: return
+	// null so des_fog stays a no-op. Unlike default_lightbank row 0 (a real neutral), default_fogbank
+	// row 0 is white / full strength / 50-100 range - harmless as an RSX-fog default, but as a mix()
+	// target it would fade everything past 100 units to white.
+	public PARAM.Row GetFogBankRow(string blockName, byte fogID) =>
+		blockName.StartsWith("default") ? null : GetRow(blockName, "fogbank", fogID);
+
+	// MSBD.Part.ShadowID -> SHADOW_BANK: the shadow's own light direction (lightDegRotX/Y, distinct
+	// from LIGHT_SCATTERING_BANK's sun), region reach (endDist), distance fade (fadeBeginDist/
+	// fadeDist), darkness (densityRatio, 0-100) and tint (colR/G/B), and depth bias (depthOffset).
+	// Consumed by ShadowRenderer + hemisphere_ambient.gdshaderinc's sun_shadow(). See docs/context.md
+	// part 39 for the field survey.
+	public PARAM.Row GetShadowBankRow(string blockName, byte shadowID) => GetRow(blockName, "shadowbank", shadowID);
+
+	// MSBD.Events.Light.PointLightID -> POINT_LIGHT_BANK (torch/campfire/candle colour + falloff).
+	// Not a direct row index - every mounted map's bank has exactly 64 rows (0-63) but real event
+	// IDs run past that (up to 139 seen in m02). `PointLightID mod 64` is the real resolution,
+	// confirmed against a live capture: a HemEnvPntS/HemDir3PntS-lit draw's fragment inline colour
+	// constant matched m02_PointLightBank row 10 exactly, and the nearest torch event's
+	// PointLightID (74) mod 64 is 10. See docs/context.md part 52. No `default_pointlightbank`
+	// fallback - unlike LightID/ScatterID/etc a Light event with no map bank simply contributes no
+	// light, rather than falling back to a same-shaped bank that would mean something different.
+	public PARAM.Row GetPointLightBankRow(string blockName, int pointLightID)
+	{
+		string mapPrefix = blockName[..blockName.IndexOf('_')];
+		return LoadParam(mapPrefix, "pointlightbank")?[pointLightID % 64];
+	}
+
+	// LIGHT_BANK's envDif/envSpc_0..3 are integer *suffixes*, not resource IDs: each map ships its
+	// own cubemaps in map/<mXX>/<mXX>_9999.tpf as TPF.TexType.Cubemap entries named
+	// EnvDif_<mXX>_<NNN>/EnvSpc_<mXX>_<NNN>, zero-padded to 3 digits, matched case-insensitively.
+	// Names are always built in the block's own map namespace, even when GetLightBankRow fell back
+	// to default_lightbank.param - the caller handles an unresolvable name (a normal outcome there).
+	// See docs/ARCHITECTURE.md's "Character/parts specular accuracy" entry for the resolution
+	// trail and why there's still no consumer (StandardMaterial3D has no cubemap slot).
 	//
-	// Names are always built in the *block's own* map namespace, even when GetLightBankRow fell
-	// back to default_lightbank.param, since the cubemaps themselves are per-map assets. An
-	// unresolvable name is a normal outcome for that fallback case and is the caller's to handle.
-	//
-	// Returns a Dictionary rather than a typed record struct on purpose: a custom struct isn't a
-	// Godot Variant type, so GDScript can't call the method at all - and a throwaway GDScript
-	// check script is this project's only verification path (see docs/ARCHITECTURE.md's "Build &
-	// verify"). A typed C# shape would be nicer at a future call site, but untestable groundwork
-	// is worse than loosely-typed groundwork; tighten it when a real consumer exists and shows
-	// what it actually needs. "env_spc" holds exactly 4 entries, indexed by g_EnvSpcSlotNo.
+	// Returns a Dictionary, not a typed record struct - a custom struct isn't a Godot Variant type,
+	// so GDScript (this project's only verification path) can't call the method at all. "env_spc"
+	// holds exactly 4 entries, indexed by g_EnvSpcSlotNo.
 	public Godot.Collections.Dictionary GetEnvCubemapNames(string blockName, byte lightID)
 	{
 		var row = GetLightBankRow(blockName, lightID);

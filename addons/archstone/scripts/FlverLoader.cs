@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using Godot;
 using SoulsFormats;
 
@@ -13,6 +14,16 @@ public partial class FlverLoader : RefCounted
 
 	// Null = this path builds to zero surfaces (some obj/ FLVER0 files are meshless dummy markers).
 	private readonly Dictionary<string, ArrayMesh?> _meshCache = new();
+
+	// A resolved MSBD.Events.Light: real position (Godot space, same X-negation every placement
+	// gets) + POINT_LIGHT_BANK's colour (premultiplied by colA/100) and falloff distances. Built
+	// once per InstantiateMap call (see ResolvePointLights) and consulted per-placement in
+	// ApplyDrawParams - reset to empty for a standalone load (InstantiateWithDefaultDrawParams has
+	// no MSB, so no lights) and at the start of every InstantiateMap so one map's torches can't
+	// leak onto a placement from a previously-loaded one. See docs/context.md part 52 for how
+	// PointLightID resolves to a bank row.
+	private readonly record struct ResolvedPointLight(Vector3 Position, Vector3 Color, float DwindleBegin, float DwindleEnd);
+	private List<ResolvedPointLight> _mapPointLights = new();
 
 	public Node3D Instantiate(string path)
 	{
@@ -39,21 +50,181 @@ public partial class FlverLoader : RefCounted
 	// all-zero IDs, i.e. row 0 of each default_* bank. See docs/ARCHITECTURE.md's "Known deferred work".
 	public Node3D InstantiateWithDefaultDrawParams(string path)
 	{
+		_mapPointLights = EmptyPointLights; // no MSB in this load path, so no light events to resolve
 		var inst = Instantiate(path);
 		ApplyDrawParams(inst, "default_", default);
 		return inst;
 	}
 
+	private static readonly List<ResolvedPointLight> EmptyPointLights = new();
+
 	public Node3D InstantiateMap(string msbPath)
 	{
 		string blockName = System.IO.Path.GetFileNameWithoutExtension(msbPath);
+		_mapPointLights = ResolvePointLights(msbPath, blockName);
 		var root = new Node3D { Name = blockName };
 		root.AddChild(BuildBloomEnvironment(blockName));
+		var casters = new Godot.Collections.Array<MeshInstance3D>();
 		foreach (var placement in _msbLoader.ReadMapPieces(msbPath))
-			root.AddChild(InstantiatePlacement(placement, blockName));
+			root.AddChild(CollectCaster(InstantiatePlacement(placement, blockName), casters));
 		foreach (var placement in _msbLoader.ReadObjects(msbPath))
-			root.AddChild(InstantiatePlacement(placement, blockName));
+			root.AddChild(CollectCaster(InstantiatePlacement(placement, blockName), casters));
+		AttachShadowRenderer(root, blockName, casters);
+		// Disabled until explicitly enabled in this node's inspector: this is a bounded
+		// layer explorer, not native effect playback. Placement uses authored MSB regions.
+		root.AddChild(new MapSfxPreview { Name = "MapSfxPreview", MapPath = msbPath });
 		return root;
+	}
+
+	// MSBD.Events.Lights -> POINT_LIGHT_BANK, resolved once per map load (not per-placement - the
+	// bank read is the same for every placement in one map). A row that fails to resolve (no bank
+	// for this map and no light-specific default namespace - see GetPointLightBankRow) drops that
+	// light rather than substituting a default one, unlike LightID/ScatterID/etc: a torch that
+	// isn't there is just not there, whereas an unresolved LightID means "use the map's own
+	// baseline ambient", a real fallback with real meaning.
+	private List<ResolvedPointLight> ResolvePointLights(string msbPath, string blockName)
+	{
+		var resolved = new List<ResolvedPointLight>();
+		foreach (var light in _msbLoader.ReadPointLights(msbPath))
+		{
+			var row = _drawParamReader.GetPointLightBankRow(blockName, light.PointLightID);
+			if (row == null) continue;
+
+			Vector3? position;
+			if (light.FlverPath != null)
+			{
+				// MapPiece anchor: FlverModelBuilder.BuildMesh already negates X per-vertex, and a
+				// MapPiece's own MSB transform is always identity (see PointLightPlacement's doc
+				// comment), so any point taken from the built mesh is already correct Godot world
+				// space - no further transform. Reuses the same Instantiate() cache every regular
+				// placement draws from, so this doesn't load the model a second time.
+				//
+				// The whole model's AABB centre (the first cut) is a bad proxy for a torch/fixture
+				// on a large architectural piece - checked directly on m3401B0 (hosts 4 of these
+				// lights): its overall AABB spans 38 world units in Y alone, so the centre sits
+				// nowhere near any real wall-mounted torch. That same model's 8 sub-meshes are
+				// mostly wall/floor/pillar chunks of similar (~15x30x16) size, except one real
+				// outlier - 784 verts, a (0.8, 3.0, 2.8)-unit box, clearly the small torch-bracket
+				// prop bundled into this piece rather than the architecture around it. Using the
+				// smallest sub-mesh's own AABB centre as the anchor point is a heuristic ("the
+				// small one is the fixture"), not confirmed ground truth, but a real, checked
+				// improvement over the whole-piece average - still collapses multiple lights
+				// sharing one piece onto that one sub-mesh's centre (per-light region-index
+				// resolution has not been investigated here), but that point is plausibly *at* the fixture
+				// instead of possibly nowhere near it.
+				var anchor = Instantiate(light.FlverPath);
+				try { position = SmallestSurfaceCenter(anchor.GetNodeOrNull<MeshInstance3D>("Mesh")?.Mesh); }
+				finally { anchor.Free(); } // Temporary inspection nodes never enter the tree.
+			}
+			else
+			{
+				// Object anchor: a real per-instance position, same X-negation every placement's
+				// own position gets in InstantiatePlacement.
+				position = new Vector3(-light.Position.X, light.Position.Y, light.Position.Z);
+			}
+			if (position == null) continue; // meshless MapPiece model - nothing to anchor to
+
+			Vector3 color = Vec3(row, "colR", "colG", "colB") / 255f
+				* (System.Convert.ToSingle(row["colA"].Value) / 100f);
+			resolved.Add(new ResolvedPointLight(position.Value, color,
+				System.Convert.ToSingle(row["dwindleBegin"].Value),
+				System.Convert.ToSingle(row["dwindleEnd"].Value)));
+		}
+		return resolved;
+	}
+
+	// The AABB centre of a mesh's smallest-volume surface, on the theory that a small prop
+	// (a torch bracket, a fixture) bundled into a bigger architectural piece is a much closer
+	// stand-in for "where a point light on this piece really is" than the whole piece's own
+	// average - see the call site's comment for the real m3401B0 numbers that motivated this.
+	// Falls back to the whole mesh's own AABB centre if it has no surfaces to compare (or isn't
+	// an ArrayMesh at all, though everything FlverModelBuilder builds is one).
+	private static Vector3? SmallestSurfaceCenter(Mesh? mesh)
+	{
+		if (mesh == null) return null;
+		if (mesh is not ArrayMesh arrayMesh || arrayMesh.GetSurfaceCount() == 0)
+			return mesh.GetAabb().GetCenter();
+
+		Vector3? best = null;
+		float bestVolume = float.MaxValue;
+		for (int i = 0; i < arrayMesh.GetSurfaceCount(); i++)
+		{
+			var verts = arrayMesh.SurfaceGetArrays(i)[(int)Mesh.ArrayType.Vertex].AsVector3Array();
+			if (verts.Length == 0) continue;
+			Vector3 min = verts[0], max = verts[0];
+			foreach (var v in verts)
+			{
+				min = new Vector3(Mathf.Min(min.X, v.X), Mathf.Min(min.Y, v.Y), Mathf.Min(min.Z, v.Z));
+				max = new Vector3(Mathf.Max(max.X, v.X), Mathf.Max(max.Y, v.Y), Mathf.Max(max.Z, v.Z));
+			}
+			Vector3 size = max - min;
+			float volume = size.X * size.Y * size.Z;
+			if (volume < bestVolume)
+			{
+				bestVolume = volume;
+				best = (min + max) * 0.5f;
+			}
+		}
+		return best ?? mesh.GetAabb().GetCenter();
+	}
+
+	private static Node3D CollectCaster(Node3D placement, Godot.Collections.Array<MeshInstance3D> casters)
+	{
+		if (placement.GetNodeOrNull<MeshInstance3D>("Mesh") is MeshInstance3D mesh && mesh.Mesh != null
+			&& CastsSunShadow(mesh))
+			casters.Add(mesh);
+		return placement;
+	}
+
+	// Only lit map/prop surfaces (the lightmap/hemisphere shader family) cast. Sky domes, ghost and
+	// additive VFX (g_LightingType=0 -> StandardMaterial3D) and water are excluded: a sky-dome mesh
+	// is enormous and would blow up the single shadow frustum, and none of them cast anything
+	// meaningful. Same test the receiver side uses (the shadow_strength uniform).
+	private static bool CastsSunShadow(MeshInstance3D mesh)
+	{
+		for (int surface = 0; surface < mesh.Mesh.GetSurfaceCount(); surface++)
+		{
+			var material = (mesh.GetSurfaceOverrideMaterial(surface)
+				?? mesh.Mesh.SurfaceGetMaterial(surface)) as ShaderMaterial;
+			if (material != null && HasUniform(material.Shader, "shadow_strength"))
+				return true;
+		}
+		return false;
+	}
+
+	// One static sun-shadow depth pass per loaded map, driven by SHADOW_BANK row 0 - the map
+	// baseline (rows can vary per part by ShadowID, e.g. "basic"/"indoor"; a single region uses the
+	// baseline). Direction, darkness/tint, the distance fade and bias all come from that row; the
+	// region itself is sized from the casters' bounds, not the row. See ShadowRenderer and
+	// docs/context.md parts 39/49.
+	private void AttachShadowRenderer(Node3D root, string blockName, Godot.Collections.Array<MeshInstance3D> casters)
+	{
+		if (casters.Count == 0)
+			return;
+		var row = _drawParamReader.GetShadowBankRow(blockName, 0);
+		if (row == null)
+			return;
+		float F(string field) => System.Convert.ToSingle(row[field].Value);
+
+		// A "default"-shaped row (degRot 0, endDist ~300) means the map ships no real shadow setup.
+		// endDist is used only as that liveness check here; beginDist/endDist (DeS's cascade split
+		// ranges) return with the 4-split. fadeBeginDist/fadeDist are the separate visual fade-out
+		// (see the SHADOW_BANK disasm, part 49) and are the only camera-dynamic part of the cast.
+		float endDist = F("endDist");
+		if (endDist <= 0.0f || endDist >= 200.0f)
+			return;
+
+		Vector3 lightDir = SunDirection(F("lightDegRotX"), F("lightDegRotY"));
+		var renderer = new ShadowRenderer { Name = "ShadowRenderer" };
+		bool ok = renderer.Setup(casters, lightDir, F("beginDist"), endDist,
+			F("fadeBeginDist"), F("fadeDist"),
+			Mathf.Clamp(F("densityRatio") / 100.0f, 0.0f, 1.0f),
+			new Color(F("colR") / 255.0f, F("colG") / 255.0f, F("colB") / 255.0f),
+			F("depthOffset"), F("shadowVolumeDepth"));
+		if (ok)
+			root.AddChild(renderer);
+		else
+			renderer.Free();
 	}
 
 	// Approximates DeS's bright-pass -> bloom stage. Environment.glow is the only post effect
@@ -115,6 +286,8 @@ public partial class FlverLoader : RefCounted
 	{
 		var inst = Instantiate(placement.ModelPath);
 		inst.Name = placement.Name;
+		inst.SetMeta("msb_entity_id", placement.EntityID);
+		inst.SetMeta("flver_path", placement.ModelPath);
 		// X negated to match FlverModelBuilder's own vertex convention (mirror of FLVER's
 		// coordinate space, see docs/ARCHITECTURE.md). Rotation sign flip is a starting hypothesis to
 		// compensate the same mirror - spot-checked but not fully proven, see docs/ARCHITECTURE.md's
@@ -147,6 +320,7 @@ public partial class FlverLoader : RefCounted
 		var toneMapRow = _drawParamReader.GetToneMapBankRow(blockName, placement.ToneMapID);
 		var toneCorrectRow = _drawParamReader.GetToneCorrectBankRow(blockName, placement.ToneCorrectID);
 		var scatterRow = _drawParamReader.GetScatterBankRow(blockName, placement.ScatterID);
+		var fogRow = _drawParamReader.GetFogBankRow(blockName, placement.FogID);
 
 		// LIGHT_BANK's own per-situation environment cubemaps. envSpc_0..3 are four progressively
 		// different sets and a material picks one via g_EnvSpcSlotNo - slot 0 is used here as a
@@ -160,6 +334,22 @@ public partial class FlverLoader : RefCounted
 			: _builder.ResolveEnvCubemap(mapPrefix, (string)cubemaps["env_dif"]);
 		var envSpc = cubemaps == null ? null
 			: _builder.ResolveEnvCubemap(mapPrefix, (string)((Godot.Collections.Array<string>)cubemaps["env_spc"])[0]);
+
+		// The point this placement's own nearest-lights lookup is measured from - NOT inst.Position:
+		// that's the placement's raw MSB translation, which for a MapPiece is *always* (0,0,0) (see
+		// ResolvePointLights's own comment on this - MapPiece geometry is baked in world space, so
+		// its MSB transform is always identity), the same trap the light side of this feature hit
+		// first. The mesh's own AABB centre, carried through the node's real transform, is correct
+		// for both cases: identity for a MapPiece (so it reduces to the mesh's already-world-space
+		// centre) and the real placement transform for an Object.
+		// inst.GlobalTransform would be the natural way to write this, but inst is still off-tree
+		// here (InstantiatePlacement builds the whole placement standalone; the caller parents it
+		// into the map root afterwards) - Node3D.GetGlobalTransform() hard-requires is_inside_tree()
+		// and returns identity otherwise (scene/3d/node_3d.cpp), which silently produced a wrong
+		// lightQueryPosition for every placement (581 on m02) until caught here. meshInst is inst's
+		// only, identity-local child (see Instantiate()), so composing the two local transforms by
+		// hand gives the same result get_global_transform() would once this is actually parented.
+		Vector3 lightQueryPosition = (inst.Transform * meshInst.Transform) * meshInst.Mesh.GetAabb().GetCenter();
 
 		for (int i = 0; i < meshInst.Mesh.GetSurfaceCount(); i++)
 		{
@@ -194,11 +384,13 @@ public partial class FlverLoader : RefCounted
 				material.SetShaderParameter("env_dif_cube", envDif ?? WhiteCubemap);
 				material.SetShaderParameter("env_spc_cube", envSpc ?? WhiteCubemap);
 				ApplyDirectionalLights(material, row);
+				BindPointLights(material, lightQueryPosition);
 			}
 			if (wantsOutputStage)
 			{
 				ApplyToneBanks(material, toneMapRow, toneCorrectRow);
 				ApplyScatterBank(material, scatterRow);
+				ApplyFogBank(material, fogRow);
 			}
 			meshInst.SetSurfaceOverrideMaterial(i, material);
 		}
@@ -225,7 +417,7 @@ public partial class FlverLoader : RefCounted
 		return cubemap;
 	}
 
-	private static bool HasUniform(Shader shader, string name)
+	internal static bool HasUniform(Shader shader, string name)
 	{
 		foreach (Godot.Collections.Dictionary uniform in shader.GetShaderUniformList())
 			if (uniform["name"].AsStringName() == name)
@@ -278,17 +470,49 @@ public partial class FlverLoader : RefCounted
 			System.Convert.ToSingle(row["degRotY_s"].Value)));
 	}
 
+	// MSBD.Events.Lights (torches/campfires/etc, resolved once per map by ResolvePointLights) -
+	// the nearest 4 to this placement's own position, matching DeS's own compiled-variant ceiling
+	// (HemEnvPntSSSS/HemDir3PntSSSS never carry more than 4). Not range-filtered before picking
+	// the nearest 4 - a light past its own dwindleEnd already contributes nothing in the shader
+	// (point_lights_diffuse's clamp), so a placement with no real torches nearby just binds inert
+	// slots rather than needing a separate "in range" check here. Unused slots (fewer than 4
+	// lights exist on this map at all) stay Vector3.Zero/Vector2.Zero, also inert.
+	private void BindPointLights(ShaderMaterial material, Vector3 worldPosition)
+	{
+		var nearest = _mapPointLights
+			.OrderBy(l => l.Position.DistanceSquaredTo(worldPosition))
+			.Take(4).ToList();
+		var pos = new Vector3[4];
+		var color = new Vector3[4];
+		var dwindle = new Vector2[4];
+		for (int i = 0; i < nearest.Count; i++)
+		{
+			pos[i] = nearest[i].Position;
+			color[i] = nearest[i].Color;
+			dwindle[i] = new Vector2(nearest[i].DwindleBegin, nearest[i].DwindleEnd);
+		}
+		material.SetShaderParameter("point_light_pos", pos);
+		material.SetShaderParameter("point_light_color", color);
+		material.SetShaderParameter("point_light_dwindle", dwindle);
+	}
+
 	// TONE_MAP_BANK/TONE_CORRECT_BANK -> output_stage.gdshaderinc's transfer function.
 	private static void ApplyToneBanks(ShaderMaterial material, PARAM.Row toneMap, PARAM.Row toneCorrect)
 	{
 		if (toneMap != null)
 		{
 			material.SetShaderParameter("tone_key", System.Convert.ToSingle(toneMap["grayKeyValue"].Value));
-			// minAdaptedLum, not the max or a midpoint: the engine's adapted luminance is the
-			// frame's own average clamped into [min, max], and the maps this drives are dark
-			// interiors that would settle at the low end. The Compatibility renderer can't read
-			// back frame luminance to do the real thing - see output_stage.gdshaderinc.
-			material.SetShaderParameter("tone_adapted_lum", System.Convert.ToSingle(toneMap["minAdaptedLum"].Value));
+			// Adapted luminance stand-in: the engine's is the frame's own geometric-mean log-luminance
+			// (DS_Fil_CalcAdaptedLum) clamped into [minAdaptedLum, maxAdapredLum]; Compatibility can't
+			// read frame luminance back. Captured `E = grayKey/adapted` from two frames (m01 094137,
+			// m02 094438) both imply adapted ~= 0.101 - so DeS scenes rest near 0.10, not at the
+			// authored floor. `clamp(0.10, min, max)` gives E ~= 1.8 on every gameplay row 0
+			// (m01..m08), 1.0 on m05 (Valley of Defilement, grayKey 0.10) and 1.29 on m07's tight
+			// band - matching the captured E values, where binding minAdaptedLum gave 2.25 on any
+			// map with an 0.08 floor (m01/m04/m06/m08), ~25% too bright. See output_stage.gdshaderinc.
+			float minLum = System.Convert.ToSingle(toneMap["minAdaptedLum"].Value);
+			float maxLum = System.Convert.ToSingle(toneMap["maxAdapredLum"].Value);
+			material.SetShaderParameter("tone_adapted_lum", Mathf.Clamp(0.10f, minLum, maxLum));
 		}
 		if (toneCorrect == null)
 			return;
@@ -320,6 +544,27 @@ public partial class FlverLoader : RefCounted
 		material.SetShaderParameter("scatter_sun_dir", SunDirection(
 			System.Convert.ToSingle(row["sunRotX"].Value),
 			System.Convert.ToSingle(row["sunRotY"].Value)));
+	}
+
+	// FOG_BANK -> output_stage.gdshaderinc's des_fog: a hand-rolled distance fade toward the bank's
+	// colour, applied before scattering. NOT RSX fog (that path is dead - docs/context.md part 36).
+	// fog_color = col/255 premultiplied by colA/100, fog_weight_scale = degRotW/100 - both verified
+	// exact against the shader's inline constants on m01/m02/m03/m06 (docs/context.md part 45).
+	// degRotW = 0 (e.g. m06) leaves fog_weight_scale at 0, which makes des_fog a no-op. Every real
+	// MapPiece carries a resolved FogID (no 255 sentinels seen), so the white default_fogbank row
+	// is effectively never hit here.
+	private static void ApplyFogBank(ShaderMaterial material, PARAM.Row row)
+	{
+		if (row == null)
+			return;
+		material.SetShaderParameter("fog_color", new Color(
+			System.Convert.ToSingle(row["colR"].Value) / 255f,
+			System.Convert.ToSingle(row["colG"].Value) / 255f,
+			System.Convert.ToSingle(row["colB"].Value) / 255f)
+			* (System.Convert.ToSingle(row["colA"].Value) / 100f));
+		material.SetShaderParameter("fog_weight_scale", System.Convert.ToSingle(row["degRotW"].Value) / 100f);
+		material.SetShaderParameter("fog_begin", System.Convert.ToSingle(row["fogBeginZ"].Value));
+		material.SetShaderParameter("fog_end", System.Convert.ToSingle(row["fogEndZ"].Value));
 	}
 
 	// Shared by LIGHT_BANK's directional lights and LIGHT_SCATTERING_BANK's sun - both spell the
