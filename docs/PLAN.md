@@ -53,6 +53,10 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
   extractor-populated directory now, not a symlink. See docs/ARCHITECTURE.md's "Asset mounting"
   section for the full picture.
 
+**Reprioritized 2026-09-06** (`docs/context.md` part 56, `docs/ARCHITECTURE.md`'s skeleton/animation entry): the list below is kept in its original order for reference, but item 2 (Havok collision parsing specifically, not necessarily full skeleton/animation) is now the actual next thing to pick up, ahead of finishing more of the graphics pipeline. Most of what's left open there (adapted-luminance eye adaptation, water's remaining accuracy, shadow movement jitter, DOF/lens flare/bloom) needs a real, gameplay-matched moving player camera to tune and verify against, not more capture/data work — so this project is shifting toward the game-logic stage (Havok collision + a real player/camera) next, since that's a genuine prerequisite for player movement regardless of sequencing and it unblocks that whole stuck class of graphics work as a side effect, rather than being a detour from it. One graphics item is still worth finishing first since it doesn't need a camera at all: the Nexus sun-ray/light-shaft quad family's edges read harder/sharper than RPCS3's soft falloff (scoped, not yet investigated).
+
+**VFX interlude (2026-09-14/15) was a deliberate, bounded exception to this reprioritization, not a reversal of it.** Everything else left open in the graphics pipeline at the time needed the player camera this reprioritization is waiting on; VFX didn't — it was almost entirely untouched (no camera-region/object-effect/playback work existed yet) and was judged easy to slot in without blocking on Havok. That work (object/camera-region VFX preview, playback corrections, the 2026-09-15 map-shading material fix) now has a solid foundation, though VFX itself isn't finished — the remaining VFX gaps (native activation, Param66, motion84 turbulence, and others listed under "Known deferred work" in `docs/ARCHITECTURE.md`) need the same kind of intense investigative work the earlier graphics items did, without similarly being blocked on a player camera. With that foundation in place, Havok collision parsing is genuinely back up next, not still deferred behind more graphics work.
+
 **Not started / next up, roughly in order:**
 1. **The in-*game* half of asset mounting** — the editor-side piece above replaces the
    old `mounted` symlink stopgap for development, but a shipped/exported build still
@@ -69,11 +73,16 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
    Python Havok animation parser (`Grimrukh/soulstruct-havok`) as the field-layout/
    algorithm reference — most notably for DeS's wavelet-compression scheme, which is
    *not* the same as later titles' spline-compression. See docs/context.md's "Havok/
-   animation ecosystem research" entry for the full trail. **Deliberately still deferred,
-   by explicit decision, not just unstarted:** even with parsing solved, this project has
-   no skeleton/animation runtime at all yet — same "no game logic to plug into" reasoning
-   already applied to `Enemy`/`Player` MSB placement below. Revisit once the graphical
-   side of the importer is largely done.
+   animation ecosystem research" entry for the full trail. **No longer deferred behind
+   "the graphical side being largely done" (2026-09-06) — Havok collision parsing
+   specifically is the near-term priority**, since it's a genuine prerequisite for player
+   movement/physics on its own terms and also closes the point-light `Collision`-anchor
+   gap already found (see docs/ARCHITECTURE.md's `POINT_LIGHT_BANK` entry). Full
+   skeleton/animation *playback* may still lag behind collision parsing itself — posing
+   needs its own runtime built on top of the parsed data, the same "no game logic to plug
+   into yet" reasoning still applying to `Enemy`/`Player` MSB placement below — but
+   parsing the format is no longer being held back pending more graphics work. See the
+   reprioritization note above and docs/context.md's part 56 for why.
 3. **Whatever else turns out to be needed for a walkable level** — sound and most other
    formats a real level depends on haven't been scoped at all yet. Collision/navmesh is a
    partial exception, found 2026-08-18: `SoulsFormatsNEXT/NVM.cs` already reads DeS
@@ -89,13 +98,37 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
    (real AI/dialogue Lua + FromSoft's `.esd` state-machine format, both already readable
    via unused `SoulsFormatsNEXT` classes) that this project has never extracted or
    touched — a genuinely separate future system (game logic, not rendering), not folded
-   into any phase item here yet pending a priority decision. `menu`/`sfx`/`remo`/`msg`
-   are the same story at smaller scale. Separately, that same search confirmed real
-   per-material shader calibration constants (water's tile/scroll/tint tuning, chr/parts
-   specular cubemap values) are **not** recoverable from any game file — the real
-   compiled shader binaries exist and were opened directly, but ship with no
-   parameter-name table — so visual-reference calibration against real screenshots stays
-   the only path for those, not a blocked-on-more-file-access item. One
+   into any phase item here yet pending a priority decision. `menu`/`remo`/`msg`
+   are the same story at smaller scale. **`sfx` parsing reached full corpus coverage
+   (3,091/3,091 files) on 2026-09-06; map placement/performance were corrected 2026-09-14.**
+   The old Part-anchor assumption was wrong: SFX's `UnkT00` indexes authored MSB regions.
+   All 278 Nexus events now resolve; the old mesh-centre fallback stacked 180 separate
+   candles (720 particle systems) at one point. Off-tree particle ownership and redundant
+   constant-emitter updates are fixed; single-axis rotations restore two missing dry-ice
+   variants. A disabled-by-default `MapSfxPreview` inspector control now offers bounded
+   nearby previews (64 systems per map, two builds per refresh) with omission diagnostics.
+   The follow-up VFX playback audit and implementation (external research archive, `VFX_PLAYBACK.md`, not tracked in this repo) corrects exclusive
+   template2117 distance selection and template2023 constant emission schedules. CPU-scheduled
+   MultiMesh billboards work in Compatibility, separating authored capacity from batch/interval.
+   Map previews budget both systems and particles, account for coverage, and warm ambient
+   instances on activation. Circle/square use provisional horizontal disk/plane distributions.
+   **91001 remains unsupported:** Param66's count conversion is unresolved; its earlier
+   population estimate was upstream of that conversion. No fixed-density fallback is used.
+   **Still needed for native playback:** broader activation/StateMap execution, finite/dynamic
+   schedules, Param66, container movement/parent-follow behavior, native distribution axes,
+   turbulence, geometry/screen actions, depth-softening/output shading and multi-axis placement
+   composition. See docs/ARCHITECTURE.md's VFX entry and docs/context.md's
+   2026-09-14 investigation for evidence and limits. This is graphics/VFX
+   work, not game logic, so it sits alongside the rendering pipeline generally rather
+   than this game-logic-data cluster; grouped here only because it was scouted at the
+   same time as `menu`/`remo`/`msg`. Separately, that same search once concluded real
+   per-material shader calibration constants were **not** recoverable from any game file
+   (symbol-stripped `.fpo` binaries) — **for water this was overturned 2026-09-05 (context.md
+   part 50)**: the water `.mtd` (`DS_Water_Env.spx`) carries the full param set
+   (`g_TileScale_0..2`, `g_TileBlend_0..2`, `g_WaterColor`, `g_Fresnel*`, `g_RefractBand`,
+   `g_BumpMapSmoose`, `g_WaterFadeBegin`), and RPCS3 frame captures confirmed each param →
+   shader-constant mapping. chr/parts specular cubemap values may be similarly recoverable via
+   the same `.rrc` route and haven't been re-checked. One
    concrete addition found while investigating unrelated `obj/` texture questions: **a
    Havok-driven destructible-debris system** (`map/breakobj/*.breakobj`, an undocumented
    FromSoft-specific format, magic header `OBJB`) that a cluster of dummy-only `obj/`
@@ -124,6 +157,18 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
      `Events` too, not just `Parts`) completes cleanly on every `.msb` spot-checked
      (`m01_00_00_00`, `m03_00_00_00`, `m03_01_00_00`, `m08_00_00_00`) with no assert
      failures anywhere in the file, not just up to the Parts section.
+   - **`MSBD.Part.DrawGroups[4]` / `DispGroups[4]` - semantics for DeS still unknown; a
+     first `MapAreaCuller` cut was built and reverted 2026-09-03 (`docs/context.md` parts 39-40).**
+     Applying the DS1 rule (part visible when its `DrawGroups` intersect the active `Collision`'s
+     `DispGroups`) deleted ~3/4 of `m02`. A `.msb` dump found **every MapPiece/Object has
+     all-zero `DispGroups`** and `Collision.DispGroups` are sparse single bits - so the DS1
+     convention gives 0 visible and the reverse gives a tiny slice. **Leading theory: DeS's
+     older engine doesn't gate map pieces by draw group at all** (blocks stream whole), the
+     system being for enemies/objects/lights only. Needs a frame-capture cross-check - a
+     Boletaria `.rrc` via `rrc-draws`, which parts DeS actually draws vs. the full MSB part list
+     - before anything culls visible geometry on it. `Part` also exposes `ShadowID`,
+     `LodParamID`, `IsShadowSrc/Dest/Only` (all-zero in DeS data - likely mis-mapped field names
+     upstream), and `UseDepthBiasFloat`, all unread.
    - **`MapPieces` (2026-07-24) and `Objects` (2026-08-17) are placed and lit; `Enemy`/
      `Player` are deliberately held off, not just unscoped.** See docs/ARCHITECTURE.md's
      "MSB map placement"/"`Objects` placement". User decision (2026-08-17): without any
@@ -138,8 +183,8 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
      `param/drawparam/<map>_lightbank.param` - loose, `PARAM`/`PARAMDEF`-readable files
      (no BND unpacking needed), confirmed to hold exactly the two-color hemisphere-ambient/
      directional-light data the shader work below already assumes. (The sibling `FogID` →
-     `FOG_BANK` was pursued the same way but is now known dead — `FOG_BANK` is RSX
-     fixed-function fog, which DeS never uses; see context.md part 36.) See docs/context.md's "Lightmap/drawparam system" parts 5-8 for
+     `FOG_BANK` is wired 2026-09-04 as `des_fog`, a colour distance fade — not RSX fog, which is
+     dead; see context.md parts 36 and 45.) See docs/context.md's "Lightmap/drawparam system" parts 5-8 for
      the full trail, including the specific row shape and field names. **Why this can't
      be resolved at the importer's current per-file granularity**: a single `.flver`
      (e.g. a common wall/prop piece) can legitimately be placed multiple times across a
@@ -165,12 +210,12 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
      single flat `LightID={0}`, while its populated sibling `m03_01_00_00` spans `{0,1,2}`
      on `MapPieces` and `{0,5,6,7}` on `Objects`/`Collisions`.
    - **A real `WorldEnvironment`/tonemap/exposure setup belongs here too, not as a
-     separate task.** docs/ARCHITECTURE.md's water and lightmap sections both already note that
-     brightness/contrast comparisons so far have been against the editor's own opaque
-     default preview lighting, not a controlled baseline, because no ambient/exposure
-     `WorldEnvironment` exists anywhere in this project yet (the glow-only bloom one added
-     2026-08-31 disables ambient and pins linear tonemap) - every shader-tuning decision made
-     before this exists is provisional. The assembler is the natural place to build one: it's the
+     separate task.** It matters less than it did now that the material families are all
+     `unshaded` and run DeS's own output stage (exposure/tonemap/tone-correct in-shader, parts
+     43-48) rather than leaning on Godot's lighting - but there is still no ambient/exposure
+     `WorldEnvironment` anywhere (the glow-only bloom one added 2026-08-31 disables ambient and
+     pins linear tonemap), so anything relying on Godot's ambient/reflection response is still
+     provisional. The assembler is the natural place to build one: it's the
      first point where a whole real map scene gets assembled (not a single loose test
      mesh loaded by a throwaway script), which is exactly when a scene-level
      `WorldEnvironment` node needs to exist anyway. Building it as part of the assembler,
@@ -252,18 +297,30 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
      `hint_screen_texture` shader on a `CanvasLayer` is the viable surface) - note this is now
      only worth it for the genuinely screen-space stages (bloom, DOF, motion blur), since
      tonemap and tone-correct already run per-material where the engine runs them;
-     ~~(7) per-material fog fed by `FogID`~~ - **superseded**. `FOG_BANK` is RSX fixed-function
-     fog, which DeS never uses (part 36); `des_fog()` and the whole path were removed 2026-09-03.
-     The outdoor atmosphere is entirely `LIGHT_SCATTERING_BANK`'s in-scatter, **user-accepted as
-     close ("about the closest we can get it for now", 2026-08-28) but not claimed engine-accurate
-     solved**. In-scatter is normalized by the **scalar** `1/(lsBetaRay + lsBetaMie)`, and the
-     per-channel wavelength weights are **measured, not fitted** - `c109` (Rayleigh) R:G:B =
-     1:1.30:1.87 and `c108` (Mie) = 1:1.69:3.50, stable across four outdoor areas
-     (Nexus/Boletaria/Stonefang/Shrine); now the shader's `RAYLEIGH_WAVELENGTH_WEIGHTS` + new
-     `MIE_WAVELENGTH_WEIGHTS`. See docs/context.md part 35. `scatter_distance_scale` and the
+     (7) per-material fog fed by `FogID` - **done 2026-09-04 (part 45)**. Not RSX fog (that path is
+     dead, part 36) - `FOG_BANK`'s *colour* is the target of a hand-rolled `mix()` distance fade in
+     the HemEnv epilogue, `mix(colour, col·colA/100, saturate(ramp·degRotW/100))` before scattering,
+     verified exact on m01/m02/m03/m06. New `des_fog` + `GetFogBankRow` + `ApplyFogBank`. Not yet
+     user-tested. The rest of the outdoor atmosphere is `LIGHT_SCATTERING_BANK`'s in-scatter,
+     **user-accepted as close but not claimed engine-accurate solved**. In-scatter is normalized
+     **per-channel by `1/β`** (captured `c106 == 1/c104` on m01/m02/m03, part 46) - β is blue-heavy
+     so the normalised in-scatter is near-neutral, matching RPCS3's grey haze; the old scalar
+     `1/(lsBetaRay+lsBetaMie)` left it Rayleigh-blue. The per-channel wavelength weights are
+     **measured, not fitted** - `c109` (Rayleigh) R:G:B = 1:1.30:1.87 and `c108` (Mie) = 1:1.69:3.50,
+     stable across four outdoor areas; now `RAYLEIGH/MIE_WAVELENGTH_WEIGHTS` (in-scatter numerator only).
+     Extinction is separate + bluer (`EXTINCTION_WAVELENGTH_WEIGHTS`, from captured `c104`, part 47) -
+     absorption on top of scattering; drives `fex` + the `1/beta` divide so distant geometry sheds
+     blue faster. See docs/context.md parts 35, 46, 47. `scatter_distance_scale` and the
      in-scatter magnitude are the one remaining co-fitted "to the reference ceiling" knob and need
-     a real frame to re-fit - deferred with this item's screen-space stages. The residual
-     map-piece lighting-colour gap is parked with them. Not recommended:
+     a real frame to re-fit. **Now actionable, not deferred (2026-09-04, part 43):** the m02
+     washout was traced to a missing `× 0.6` vertex-colour factor + `des_tonemap` being a Reinhard
+     curve when DeS's whole tone pipeline is linear (`saturate(color · E)`, both passes
+     disassembled - no LUT). Both fixed. `scatter_distance_scale = 0.0035` was eye-fitted against
+     that old Reinhard, so with `des_tonemap` now linear it needs re-deriving against m01 *and* m02
+     together. `des_tone_correct` was checked (2026-09-04) and is **already engine-accurate** - the
+     `DS_Fil_HDR_ColAdj` colour matrix is exactly `S(sat)·diag(contrast)·diag(brightness)` + pivot
+     offset, which our `B → C-pivot → S → H` composition reproduces to measurement precision; the
+     binding reaches the geometry (verified headless). Not recommended:
      re-attempting `Environment.Adjustment*` or a `grayKeyValue → TonemapExposure` mapping in any
      form, or adding an *ambient/reflection* `WorldEnvironment` before item (4). (A glow-only one
      for bloom was added 2026-08-31 with ambient/reflection disabled — see docs/ARCHITECTURE.md's
@@ -289,24 +346,40 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
      FP 99.6% HIGH-named on the Nexus frame. Drove the measured wavelength-weight fix above.
      **`fetch_fog_value` / RSX hardware fog: closed as a non-gap 2026-09-03** (`rrc-fog`, part 36) -
      eight frame captures prove DeS never issues `SET_FOG_PARAMS` and no shader reads `f[FOGC]`, so
-     `des_fog()` + `ApplyFogBank` + the `fog_*` uniforms + `GetFogBankRow` modelled a mechanism the
-     game doesn't use and were **removed 2026-09-03**; the scattering term is now the shader's only
-     atmosphere. **Still open:** DeS's own hand-rolled per-material distance ramp
-     (`_fetch_constant`-based, ~7 of 183 scattering shaders) - constants are inline in the FP
-     microcode, pullable via `rrc-draws`. And a magnitude re-fit of `scatter_distance_scale` /
-     in-scatter strength against a real frame, folded into the screen-space pipeline work.
+     the *RSX-fog* `des_fog()` + its `fog_*` uniforms were **removed 2026-09-03** (correct - RSX fog is
+     dead). **But DeS's own hand-rolled per-material distance fade toward the FOG_BANK *colour* was
+     found and implemented 2026-09-04 (part 45)** - it's the `mix()` two instructions before
+     `result·tc8 + tc9` in the standard HemEnv epilogue (not ~7 niche shaders), colour `= col·colA/100`
+     and weight scale `= degRotW/100` verified exact on m01/m02/m03/m06. New `des_fog` + `GetFogBankRow`
+     + `ApplyFogBank`. **Still open:** a magnitude re-fit of `scatter_distance_scale` / in-scatter
+     strength against a real frame, folded into the screen-space pipeline work.
      ~~(f) systematic constant + render-state mining across all eight captures~~ - **done
      2026-09-03** (`rrc-mine`, part 37): `RrcInterp` now tracks the surface/viewport/mask
      state; every constant register is attributed to the VP microcode that references it,
      per-frame vs per-draw. The `.rrc` interpreter is now considered finished.
-   - **Shadow / depth pipeline - fully characterised, implementation not started (analysis done
-     2026-09-03, `rrc-shadow`, part 37).** DeS uses **4-split PSSM**: 4 ortho depth passes from
+   - **Shadow / depth pipeline - `SHADOW_BANK`-driven. v1 built 2026-09-03 (`docs/context.md`
+     parts 37-41); v2 = ONE STATIC ortho depth pass over the casters' bounds, 2048² atlas +
+     Poisson PCF + real SHADOW_BANK numbers, 2026-09-04 (part 49), user-confirmed "about right".
+     The cast is fixed (sun + geometry), so the projection never follows the camera; only the
+     shader distance fade is camera-dynamic. Two camera-following cuts (mild-perspective, then
+     texel-snapped ortho) were tried and reverted - both made shadows visibly slide as the view
+     moved. **The true 4-split (below) waits for a player camera**: CSM cascades track the view
+     frustum, so in the editor free-fly cam they'd sweep the same way. opengl3 compile check clean.
+     Analysis: `rrc-shadow` part 37, `DS_*_Sdw`/`Csd` disasm + `ShadowBank.paramdef` part 49.**
+     DeS uses **4-split *perspective* shadow maps** (the `ShadowBank` "PSM" fields
+     `calibulateFar`/`persedDepthOffset`/`radFactor`; the captured cast matrices have a real
+     W-row and the light basis re-warps around the camera each frame). 4 depth passes from
      the sun into a **2048x2048 Z24S8 atlas as a 2x2 grid of 1024x1024 tiles** (`c[467].zy` =
      `(2.0, 0.5)` = surface/tile ratio and clip->UV half-scale; `c[466].x` = `1/1024` texel).
      No separate depth pre-pass. Cast matrix per split = `c[0..3]` (shared light view, per-split
-     ortho frustum). Receive: **map pieces take one cascade matrix per draw in `c[112..115]`**
-     (clip->atlas-UV); **characters carry all 4 as column-major fragment inline constants and
-     pick per pixel**. PCF filter (kernel still to pull from the `Sdw` fragment disasm).
+     frustum). Receive: **map pieces take one cascade matrix per draw in `c[112..115]`**
+     (clip->atlas-UV, per-draw where a piece spans splits - confirmed in the Boletaria capture);
+     **characters carry all 4 as column-major fragment inline constants and pick per pixel**
+     (one-hot select by `near_i < viewDepth <= far_i`, from the `Csd` disasm). Filter = **one
+     hardware `TXPR`** (2x2 bilinear). Fade = `saturate((fadeEnd - radialDist)/fadeDist)`,
+     `fadeEnd = fadeBeginDist + fadeDist` - a **separate** distance pair from `beginDist`/`endDist`
+     (the frustum range). Composite = `1 - (density - tint)*fade*inShadow` per channel (matches
+     what we already had). All from part 49's disasm.
      **Decision (2026-09-03): implement custom, not via Godot light nodes** - Godot has no
      shadow-only light, the shadow term is only reachable in `light()` (runs after `fragment()`,
      where DeS composes `min(shadow, lightmap)`), and Godot PSSM != DeS's atlas.
@@ -323,55 +396,95 @@ and walked around in the editor. This phase is infrastructure, not gameplay.
      5/5 test points correctly (tall box shadows the ground under it, open ground lit, box tops
      lit, sun-side surfaces lit). No CompositorEffect, no light nodes, no engine shadow system.
 
-     **Design (v1 - single region, not the full 4-split PSSM):**
-     - **`ShadowRenderer`** (new, `addons/archstone/scripts/`): owns one `SubViewport`
-       (1024x1024, matching DeS's tile) + ortho `Camera3D`. Built by `FlverLoader.InstantiateMap`
-       / `InstantiateWithDefaultDrawParams` after the geometry is placed. `render_target_update_
-       mode = UPDATE_ONCE`, re-armed only when a caster moves (nothing moves yet).
-     - **Sun direction** from the data already resolved: `LIGHT_SCATTERING_BANK` c111 sun dir
-       (the `scatter_sun_dir` uniform) / `LIGHT_BANK`'s primary directional. `ShadowRenderer`
-       reads the same row `FlverLoader` already fetched.
-     - **Region**: one ortho box sized to the loaded map's clamped AABB, or (in-editor) centred
-       on the active `Camera3D`. This is DeS's enclosed-Nexus 2-tile / single-region case;
-       true 4-split PSSM waits for a player camera to split a frustum around (deferred with the
-       rest of the player-camera work).
-     - **Caster tree**: for each placed map-piece / object `MeshInstance3D`, a sibling
-       `MeshInstance3D` under the SubViewport sharing the same `Mesh` *resource* (node overhead
-       only, no mesh data copy) with one shared depth material. Alpha-scissor casters (foliage,
-       DeS `DepAlp`) get a second depth material that also samples the diffuse alpha +
-       `ALPHA_SCISSOR`. (Optimisation for later: `RenderingServer` instances against the mesh
-       RIDs instead of nodes.)
-     - **Shader**: add to `hemisphere_ambient.gdshaderinc` (shared by `lightmap*` /
-       `terrain_blend`): `uniform sampler2D shadow_map`, `uniform mat4 shadow_light_matrix`
-       (= `light_proj * light_view`), `uniform float shadow_light_far`, `uniform float
-       shadow_bias`. In `fragment()`: 3x3 PCF, `shadow in [0,1]`, applied as DeS's
-       **`min(shadow, lightmap)` gate on the directional/env term only** - the two-colour
-       hemisphere floor stays untouched (matches the bytecode; see ARCHITECTURE.md's HemEnv
-       entry). `des_output`'s scattering then lifts the shadowed geometry, which is what makes
-       the gate safe (condensed atmosphere entry in docs/context.md).
-     - **Faithful to DeS**: ortho directional shadow, linear light-space depth, PCF,
-       `min(shadow, lightmap)` composition point, 1024^2 tile, `0.5` clip->UV bias (`c467.z`).
-       **Deviates for v1**: one region instead of 4-split PSSM + 2x2 atlas; our own region fit
-       instead of DeS's per-frame runtime frusta (those are not authored data - they are
-       whatever the player camera produced that frame).
-     - **Files**: `ShadowRenderer.cs`, `shadow_depth.gdshader` (+ `_scissor` variant), uniform
-       block + PCF in `hemisphere_ambient.gdshaderinc`, wiring in `FlverLoader.cs` /
-       `archstone.gd`. Verify: opengl3 compile check, then a real map in-editor.
+     **What's built (2026-09-03; `docs/context.md` parts 38-41 have the blow-by-blow):**
+     - **`ShadowRenderer.cs`** - a `[Tool]` `Node` built by `FlverLoader.InstantiateMap`, owning
+       one `SubViewport` (2048² - DeS's full shadow surface, used as one map; `transparent_bg`,
+       `own_world_3d`, `UPDATE_ALWAYS`) + ortho `Camera3D` + a `MeshInstance3D` clone per lit
+       caster (shared `Mesh` resource, one `shadow_depth.gdshader` `MaterialOverride`;
+       sky/ghost/VFX + water excluded via `FlverLoader.CastsSunShadow`). **v2 (part 49) = ONE
+       STATIC ortho depth pass.** The cast is fixed by the sun + the geometry, so the projection
+       is computed once (merged caster world-AABB; radius `min(½·diag + 2, 200)` cap;
+       `pullback = radius + volumeDepth + 5`; `far = 2·radius + volumeDepth + 10`), pushed once,
+       and `ShadowRenderer` has **no `_Process`**. The only camera-dynamic part is the shader
+       `fade`. User A/B: "about right". *Rejected first:* a
+       mild-perspective follower (shadows swam), then a texel-snapped ortho follower (still slid -
+       a moving cast is a moving cast). **v1** was an ortho box `clamp(endDist*0.75, 8, 120)`
+       re-rendered past a `endDist*0.4` drift threshold (the snap the user saw).
+     - **`SHADOW_BANK` row 0** (`DrawParamReader.GetShadowBankRow`, map baseline; per-part
+       `ShadowID` rows exist but one region uses one): light **direction** from
+       `lightDegRotX/Y` (its own, not the scattering sun), **fade** from `fadeBeginDist`/`fadeDist`
+       (the only camera-dynamic part), far-range extrusion from `shadowVolumeDepth`, darkness from
+       `densityRatio`/100 (partial - never fully black), tint from `colR/G/B`/255 (≈0), bias from
+       `depthOffset` (~-0.01, small world-constant tiebreaker). `beginDist`/`endDist` (0→10 m01,
+       0→40 m02 - the cascade split ranges) are **not** used by the static region; they return with
+       the 4-split. A default-shaped row (`endDist ≥ 200`) → no shadow.
+     - **`shadow_depth.gdshader`**: `unshaded, cull_front` (back faces only → lit surface sits
+       ahead of its occluder, kills acne, mild contact light-leak), linear light-space distance
+       **packed 16-bit across R,G** (unaffected by the projection type).
+     - **`sun_shadow()`** (`hemisphere_ambient.gdshaderinc`) returns a **per-channel** term
+       `1 - (density - tint)·fade·inShadow`; two mat4s (`shadow_light_clip` for the atlas UV -
+       `.xy/.w` divide, `.w` is 1 under ortho but the code stays general for the 4-split
+       perspective phase; `shadow_light_view` to rebuild the linear depth);
+       **v2 rotated 12-tap Poisson-disk PCF** (per-fragment rotation hashed from `world_pos`)
+       standing in for DeS's one hardware 2×2 `TXPR`; `fade` (`fadeBeginDist`/`fadeDist` vs
+       `view_distance`) is the sole camera-dynamic term; out-of-atlas / faded /
+       empty-texel → `vec3(1.0)`. Gate `min(shadowTerm, lightmap)` on the HemEnv env term,
+       `×shadowTerm` on the HemDir3 directional term, hemisphere floor ungated. `view_distance`
+       threaded through `lightmap_shade` (4 variants) + `terrain_blend`.
+     - **Files**: `ShadowRenderer.cs`, `shadow_depth.gdshader`, `DrawParamReader.GetShadowBankRow`,
+       `sun_shadow()` + uniforms in `hemisphere_ambient.gdshaderinc`, gate wiring in
+       `lightmap_common.gdshaderinc` / `lightmap*.gdshader` / `terrain_blend.gdshader`,
+       `AttachShadowRenderer` + `HasUniform` visibility in `FlverLoader.cs`. `archstone.gd`
+       unchanged.
+     - **Engine-accurate (v2)**: direction, `densityRatio`, tint, the distance fade,
+       `shadowVolumeDepth`, `1 - (density - tint)·fade·inShadow` composite
+       (all `ShadowBank.paramdef` + the `DS_*_Sdw`/`Csd` disasm, part 49). **Reductions**: one
+       **static** ortho region, not the 4-split camera-relative **perspective** (PSM) atlas +
+       cascade select. **The 4-split waits for a player camera** - DeS's cascades track the view
+       frustum (look direction included), so in the editor free-fly cam they'd sweep like the two
+       reverted follower cuts; a gameplay chase cam is what makes CSM read as stable.
+       `beginDist`/`endDist` + `calibulateFar`/`persedDepthOffset`/`radFactor` (the PSM warp)
+       unmodelled; whole-region 2048² ortho box → coarse texels on a large map (200 cap trades
+       reach for texel size); Poisson-over-8-bit stands in for one `TXPR`; `cull_front` trades
+       acne for light-leak; no alpha-scissor casters; `lightDegRotX/Y` → vector reading
+       unverified; not wired into the "Load Folder" path (one SubViewport per model - needs a
+       batched entry point). **User A/B (part 49): "about right now."**
+     - **History**: whole-map capped-box first cut + its region-sizing/depth fixes (part 38); a
+       `MapAreaCuller` draw-group cull tried and reverted (part 40, the DS1 rule deletes most of
+       a DeS block - map pieces may not use draw groups at all); replaced by the above (part 41).
+     - **Part 42/43 note:** the m02 (Boletaria) washout was *initially* attributed to missing
+       cascaded shadows (wrong - m02 is 85% lightmapped), then to the env-cubemap decode path
+       (also wrong - decode is byte-correct). **Part 43 read the actual cause out of the HemEnv
+       fragment programs + the disassembled `ds_filter` post chain:** (1) HemEnv multiplies vertex
+       colour by a fixed `0.6` we omitted; (2) DeS's whole tone pipeline is **linear** - geometry
+       epilogue `saturate(color · E / 2)`, post `DS_Fil_HDR_ColAdj` `saturate(scene · 2) + bloom`
+       then a colour matrix; the `/2`·`2` cancel so the net is `saturate(color · E)`. No Reinhard,
+       no LUT anywhere - the old `des_tonemap` `x/(1+x)` was a wrong assumption. **Both fixed
+       2026-09-04** (`lightmap_common.gdshaderinc` + `terrain_blend.gdshader` for (1);
+       `output_stage.gdshaderinc` `des_tonemap` → `clamp(color · E, 0, 1)` for (2), after a first
+       attempt with a stray `· 0.5` came out 2× too dark). Parts 44–48 then closed the rest:
+       colour space verified (no output encode, `: source_color` a no-op - part-42 theory dead),
+       `des_tone_correct` already the exact `DS_Fil_HDR_ColAdj` matrix, `des_fog` re-added for the
+       real `FOG_BANK` colour term, sky-dome routing, per-channel `1/β` in-scatter + extinction
+       weights, and `tone_adapted_lum = clamp(0.10, min, max)`. **User-confirmed "extremely
+       accurate now".** Remaining: `scatter_distance_scale` / planar-depth re-fit, bloom -
+       deferred behind the rest of the pipeline. Shadows resumed 2026-09-04 with the part 49 dig +
+       v2; the 4-split *perspective* atlas is still the shadow endgame, on the v2 foundation.
    - **Two user-reported issues tracked as of 2026-08-28, both no longer active.** **(a)
      ~~shadowed geometry reads too dark to make out detail~~ - resolved as a byproduct of the
      atmosphere work: additive in-scatter now genuinely lifts shadowed surfaces, which is also
      what makes the part-19 pivot contrast form safe to keep (condensed atmosphere entry). Not
      separately confirmed by the user as its own item but no longer reported.** **(b) ~~placed
      props/`Objects` render black without a `WorldEnvironment`~~ - fixed 2026-08-28, see part 25.**
-   - **Deferred (was "current top priority", 2026-08-28): a small map-piece lighting-colour gap
-     vs RPCS3's warmer tone.** Not a contrast problem (the diffuse-hemi crush is gone with that
-     term; the pivot black point is covered by the haze at player range). Since 2026-08-28 the
-     scattering wavelength split has been measured (part 35) and the `FOG_BANK` path removed
-     (part 36), so what's left is `scatter_distance_scale` / the in-scatter magnitude and/or the
-     `LIGHT_BANK` shading itself. The `LIGHT_BANK` "diffuse hemisphere" pair (`colA_du`/`colA_dd`)
-     is **not** the lead — wired and reverted three times, every attempt flattened the scene.
-     Parked until the screen-space stages of this item exist and there is a full pipeline to
-     judge against. See docs/context.md's condensed atmosphere entry and `.local-notes.md`.
+   - **The map-piece lighting-colour gap (was "top priority" 2026-08-28) — largely closed by
+     parts 43–48 (2026-09-04), user-confirmed "extremely accurate now".** The cause was seven
+     concrete output-stage bugs (missing `× 0.6`, Reinhard `des_tonemap`, missing `FOG_BANK` fade,
+     sky-dome bypass, scalar in-scatter normalisation, extinction not blue enough, wrong
+     adapted-luminance stand-in) — each read from the HemEnv fragment programs and the captured VP
+     constants, not fitted. See docs/context.md parts 43–48. The `LIGHT_BANK` "diffuse hemisphere"
+     pair (`colA_du`/`colA_dd`) was **not** the lead — wired and reverted three times. Residual
+     minor inconsistencies (scatter magnitude, dynamic exposure, radial-vs-planar distance) are
+     deferred behind shadows / bloom / the rest of the pipeline.
    - **Cutscene/event data lives in `remo/scnAAxxxx.remobnd`** (`AA` = area number, e.g.
      `scn02xxxx` for Boletaria) - each a real, structured multi-cut sequence (camera
      `.sibcam` + Havok `.hkx` animation per cut, plus a `.tae` timed-event file).
