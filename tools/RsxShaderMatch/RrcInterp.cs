@@ -40,7 +40,40 @@ static class RrcInterp
         // Render-target / write state - lets a depth-only shadow-cast pass be told apart from
         // the colour pass without touching pixels.
         public required RenderState Rs { get; init; }
+
+        // Per fragment-texture-unit state at this draw (units 0-15). Raw RSX method register
+        // values; decode with the helpers below. NV4097_SET_TEXTURE_* live at method
+        // 0x680 + unit*8 (+1 FORMAT, +2 ADDRESS, +3 CONTROL0).
+        public required uint[] TexFormat { get; init; }    // [16] - format() = (v>>8)&0xff, cubemap = (v>>2)&1, mips = (v>>16)&0xffff
+        public required uint[] TexAddress { get; init; }   // [16] - gamma (sRGB-on-fetch, RGBA) = (v>>20)&0xf; unsigned_remap = (v>>12)&0xf
+        public required uint[] TexControl0 { get; init; }  // [16] - enabled = (v>>31)&1
+        public required uint[] TexControl1 { get; init; }  // [16] - the channel remap/swizzle register
     }
+
+    // Base pixel format (NV4097_SET_TEXTURE_FORMAT bits 8-15, with the LN/UN linear/unnorm flags
+    // stripped). CELL_GCM_TEXTURE_* per RPCS3's gcm_enums.h.
+    public static byte TexBaseFormat(uint texFormatReg) => (byte)(((texFormatReg >> 8) & 0xff) & ~0x60);
+    public static bool TexIsCube(uint texFormatReg) => ((texFormatReg >> 2) & 1) != 0;
+    public static int TexMipCount(uint texFormatReg) => (int)((texFormatReg >> 16) & 0xffff);
+    // Per-channel sRGB->linear-on-fetch mask, RGBA order (bit0=R,1=G,2=B,3=A). Applied by RSX only
+    // for the gamma-capable colour formats (A8R8G8B8, DXT1/23/45, B8, G8B8, R5G6B5, ... - not
+    // depth/float/X16). See RPCS3 RSXTexture.cpp fragment_texture::gamma() + get_format_features().
+    public static int TexGammaMask(uint texAddressReg) => (int)((texAddressReg >> 20) & 0xf);
+    public static int TexUnsignedRemap(uint texAddressReg) => (int)((texAddressReg >> 12) & 0xf); // 1 = BIASED/BX2 range decompress
+    public static int TexSignedRemap(uint texAddressReg) => (int)((texAddressReg >> 24) & 0xf);
+    public static bool TexEnabled(uint texControl0Reg) => ((texControl0Reg >> 31) & 1) != 0;
+
+    public static string TexFormatName(byte baseFormat) => baseFormat switch
+    {
+        0x81 => "B8", 0x82 => "A1R5G5B5", 0x83 => "A4R4G4B4", 0x84 => "R5G6B5", 0x85 => "A8R8G8B8",
+        0x86 => "DXT1", 0x87 => "DXT23", 0x88 => "DXT45", 0x8B => "G8B8", 0x8F => "R6G5B5",
+        0x90 => "DEPTH24_D8", 0x91 => "DEPTH24_D8_F", 0x92 => "DEPTH16", 0x94 => "X16",
+        0x97 => "R5G5B5A1", 0x9C => "X32_FLOAT", 0x9E => "D8R8G8B8", 0x9F => "Y16_X16_F",
+        _ => $"0x{baseFormat:X2}",
+    };
+    // The colour formats RSX will actually gamma-correct on fetch (RPCS3 get_format_features).
+    public static bool TexFormatGammaCapable(byte baseFormat) => baseFormat is
+        0x81 or 0x82 or 0x83 or 0x84 or 0x85 or 0x86 or 0x87 or 0x88 or 0x8B or 0x8D or 0x8E or 0x8F or 0x97 or 0x9D or 0x9E;
 
     public readonly record struct RenderState(
         uint SurfaceW, uint SurfaceH,     // SET_SURFACE_CLIP_* extents (the actual render area)
@@ -71,6 +104,7 @@ static class RrcInterp
         byte depthFmt = 0;
         bool depthWrite = true;
         int constLoad = 0, vpLoad = 0, vpStart = 0;
+        var texRegs = new uint[128];                      // NV4097_SET_TEXTURE_* methods 0x680..0x6FF
         var vpWords = new uint[MaxVpInstr * 4];
         var consts = new float[468][];
         for (int i = 0; i < 468; i++) consts[i] = new float[4];
@@ -203,13 +237,23 @@ static class RrcInterp
                 case RrcCapture.NV4097_DRAW_INDEX_ARRAY:
                 {
                     var ds = Snapshot(draws.Count, reg == RrcCapture.NV4097_DRAW_INDEX_ARRAY,
-                        shaderProgReg, vpWords, vpStart, consts, constWritten,
+                        shaderProgReg, vpWords, vpStart, consts, constWritten, texRegs,
                         fogMode, fogParam0, fogParam1,
                         new RenderState(surfW, surfH, depthFmt, (byte)colorTarget, colorMask, depthWrite, vpX, vpY, vpW, vpH));
                     draws.Add(ds);
                     pending.Add(ds);
                     break;
                 }
+
+                default:
+                    // Per-unit fragment-texture state (units 0-15) lives at method 0x680 + unit*8
+                    // and up; a FIFO command writes `count` consecutive method registers.
+                    for (int k = 0; k < count; k++)
+                    {
+                        int m = reg + k;
+                        if (m >= 0x680 && m < 0x700) texRegs[m - 0x680] = args[k];
+                    }
+                    break;
             }
         }
 
@@ -218,7 +262,7 @@ static class RrcInterp
     }
 
     static DrawState Snapshot(int index, bool indexed, uint shaderProgReg,
-        uint[] vpWords, int vpStart, float[][] consts, bool[] constWritten,
+        uint[] vpWords, int vpStart, float[][] consts, bool[] constWritten, uint[] texRegs,
         uint fogMode, float fogParam0, float fogParam1, RenderState rs)
     {
         // VP: emit from slot vpStart to the end of what's been written, big-endian, for RsxVp.
@@ -239,6 +283,18 @@ static class RrcInterp
         var cc = new float[468][];
         for (int i = 0; i < 468; i++) cc[i] = (float[])consts[i].Clone();
 
+        var tf = new uint[16];
+        var ta = new uint[16];
+        var tc0 = new uint[16];
+        var tc1 = new uint[16];
+        for (int u = 0; u < 16; u++)
+        {
+            tf[u] = texRegs[u * 8 + 1];   // FORMAT   = 0x681 + u*8
+            ta[u] = texRegs[u * 8 + 2];   // ADDRESS  = 0x682 + u*8
+            tc0[u] = texRegs[u * 8 + 3];  // CONTROL0 = 0x683 + u*8
+            tc1[u] = texRegs[u * 8 + 4];  // CONTROL1 = 0x684 + u*8 (remap)
+        }
+
         return new DrawState
         {
             Index = index,
@@ -252,6 +308,10 @@ static class RrcInterp
             FogParam0 = fogParam0,
             FogParam1 = fogParam1,
             Rs = rs,
+            TexFormat = tf,
+            TexAddress = ta,
+            TexControl0 = tc0,
+            TexControl1 = tc1,
         };
     }
 }

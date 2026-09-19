@@ -15,6 +15,10 @@ if (args.Length == 0)
           rsxshadermatch disasm <file.fpo|file.vpo>            readable RSX assembly listing (kind auto-detected)
           rsxshadermatch rrc    <file.rrc.gz>                  summarise an RPCS3 frame capture (method histogram)
           rsxshadermatch rrc-fog <file.rrc.gz>                 RSX fixed-function fog state per draw + FOG_BANK invert
+          rsxshadermatch rrc-draws <file.rrc.gz> <lib-dir> [--only=N] [--grep=substr]
+                                                               name/print each draw's bound FP/VP + dump vertex constants
+          rsxshadermatch rrc-tex <file.rrc.gz> <lib-dir> [--grep=substr] [--only=N]
+                                                               per-draw fragment-texture-unit state (format/address/gamma)
           rsxshadermatch rrc-mine <file.rrc.gz> <lib-dir> [--json=out.json]
                                                                per-pass constant + render-state census (shadow/depth data)
           rsxshadermatch rrc-shadow <file.rrc.gz> <lib-dir>    shadow atlas tiles, cast/receive matrices, cascade layout
@@ -58,11 +62,21 @@ switch (args[0])
         return RrcDraws(args[1], args[2], only, grep);
     }
 
+    case "rrc-tex":
+    {
+        if (args.Length < 3) { Console.Error.WriteLine("rrc-tex <capture.rrc.gz> <lib-dir> [--grep=substr] [--only=N]"); return 1; }
+        var rest = args.Skip(3).ToArray();
+        string? grep = rest.FirstOrDefault(a => a.StartsWith("--grep=", StringComparison.Ordinal))?["--grep=".Length..];
+        int? only = int.TryParse(rest.FirstOrDefault(a => a.StartsWith("--only=", StringComparison.Ordinal))?["--only=".Length..], out int to) ? to : null;
+        return RrcTex(args[1], args[2], grep, only);
+    }
+
     case "rrc-mine":
     {
-        if (args.Length < 3) { Console.Error.WriteLine("rrc-mine <capture.rrc.gz> <lib-dir> [--json=out.json]"); return 1; }
+        if (args.Length < 3) { Console.Error.WriteLine("rrc-mine <capture.rrc.gz> <lib-dir> [--json=out.json] [--vpc]"); return 1; }
         string? json = args.Skip(3).FirstOrDefault(a => a.StartsWith("--json=", StringComparison.Ordinal))?["--json=".Length..];
-        return RrcMine(args[1], args[2], json);
+        bool vpc = args.Skip(3).Any(a => a == "--vpc");
+        return RrcMine(args[1], args[2], json, vpc);
     }
 
     case "rrc-shadow":
@@ -974,6 +988,89 @@ static int RrcDraws(string capturePath, string libDir, int? only, string? grep)
     return 0;
 }
 
+// ===== rrc-tex: per-draw fragment-texture-unit state (format + sRGB-on-fetch gamma) =====
+// Answers "does DeS gamma-decode the env cubemap / diffuse / lightmap on fetch?" straight from
+// NV4097_SET_TEXTURE_FORMAT (0x681+u*8) and NV4097_SET_TEXTURE_ADDRESS (0x682+u*8, bits 20-23).
+static int RrcTex(string capturePath, string libDir, string? grep, int? only)
+{
+    if (!File.Exists(capturePath)) { Console.Error.WriteLine($"no such file: {capturePath}"); return 1; }
+    if (!Directory.Exists(libDir)) { Console.Error.WriteLine($"not a directory: {libDir}"); return 1; }
+
+    RrcCapture.Frame frame;
+    try { frame = RrcCapture.Parse(capturePath, keepData: true); }
+    catch (Exception e) { Console.Error.WriteLine($"parse failed: {e.Message}"); return 1; }
+
+    var fpLib = LoadLibrary(libDir);
+    Console.Error.WriteLine($"library: {fpLib.Count} fragment programs");
+    var draws = RrcInterp.Replay(frame);
+    Console.WriteLine($"{System.IO.Path.GetFileName(capturePath)}: {draws.Count} draws  (grep: {grep ?? "HemEnv"})\n");
+
+    grep ??= "HemEnv";
+
+    // per-(shaderName, unit) tally of the gamma mask seen
+    var roleGamma = new Dictionary<string, Dictionary<string, int>>();
+    void Tally(string role, string key) { roleGamma.TryAdd(role, new()); roleGamma[role].TryGetValue(key, out int c); roleGamma[role][key] = c + 1; }
+    int shown = 0, matched = 0;
+
+    foreach (var d in draws)
+    {
+        if (d.FpUcode == null) continue;
+        RsxFp.Fingerprint fp;
+        string fpName;
+        try
+        {
+            (_, fp) = RsxFp.Decode(d.FpUcode);
+            var cap = FpCaptureFromFingerprint(fp);
+            var best = fpLib.Select(l => (l, s: Score(l, cap))).OrderByDescending(x => x.s.Total).ThenBy(x => x.l.Name, StringComparer.Ordinal).First();
+            fpName = best.l.Name;
+        }
+        catch { continue; }
+
+        bool match = only == d.Index || (only == null && fpName.Contains(grep, StringComparison.OrdinalIgnoreCase));
+        if (!match) continue;
+        matched++;
+
+        // op per unit from the FP's texture sequence (2D / Cube / Shd / ...)
+        var opByUnit = new Dictionary<int, string>();
+        foreach (var (op, unit) in fp.TextureSequence) opByUnit[unit] = op;
+
+        var lines = new List<string>();
+        foreach (int u in fp.TextureUnits.OrderBy(x => x))
+        {
+            uint fmtReg = d.TexFormat[u], addrReg = d.TexAddress[u], ctrl0 = d.TexControl0[u], ctrl1 = d.TexControl1[u];
+            byte bf = RrcInterp.TexBaseFormat(fmtReg);
+            bool cube = RrcInterp.TexIsCube(fmtReg);
+            int mips = RrcInterp.TexMipCount(fmtReg);
+            int gmask = RrcInterp.TexGammaMask(addrReg);
+            int uremap = RrcInterp.TexUnsignedRemap(addrReg);
+            int sremap = RrcInterp.TexSignedRemap(addrReg);
+            bool gammaCap = RrcInterp.TexFormatGammaCapable(bf);
+            bool srgb = gammaCap && (gmask & 0x7) != 0;   // any of R/G/B gamma-decoded
+            string op = opByUnit.GetValueOrDefault(u, "?");
+            string role = op == "Cube" ? "envCube" : u == 6 ? "lightmap(u6)" : op == "Shd" ? "shadow" : "diffuse/other";
+            string flags = srgb ? "sRGB" : gmask != 0 ? $"gmask=0x{gmask:X}(ignored)" : "linear";
+            if (uremap == 1) flags += "+BX2";
+            if (sremap != 0) flags += $"+SNORM0x{sremap:X}";
+            Tally(role, flags);
+            lines.Add($"    u{u,-2} {op,-4} fmt={RrcInterp.TexFormatName(bf),-11} cube={(cube ? "Y" : "-")} mips={mips,-2}"
+                    + $" g=0b{Convert.ToString(gmask, 2).PadLeft(4, '0')} uremap={uremap} sremap=0x{sremap:X} remapReg=0x{ctrl1:X8}"
+                    + $" {(srgb ? "<sRGB>" : "")}");
+        }
+
+        if (only != null || shown < 24)
+        {
+            shown++;
+            Console.WriteLine($"#{d.Index,-4} {fpName}");
+            foreach (var l in lines) Console.WriteLine(l);
+        }
+    }
+
+    Console.WriteLine($"\n{matched} draws matched '{grep}'.  Gamma-on-fetch by role:");
+    foreach (var (role, tally) in roleGamma.OrderBy(k => k.Key))
+        Console.WriteLine($"  {role,-16}  {string.Join("   ", tally.OrderByDescending(t => t.Value).Select(t => $"{t.Key}: {t.Value}"))}");
+    return 0;
+}
+
 // ===== rrc-mine: systematic constant + render-state census across one frame capture =====
 // Names every draw, classifies its pass (COLOR / DEPTH / SHADOW by SET_SURFACE state), and
 // reports which vertex constant registers and fragment inline constants each (pass, shader)
@@ -1017,7 +1114,7 @@ static bool Vec4Eq(float[] a, float[] b) =>
     && BitConverter.SingleToInt32Bits(a[2]) == BitConverter.SingleToInt32Bits(b[2])
     && BitConverter.SingleToInt32Bits(a[3]) == BitConverter.SingleToInt32Bits(b[3]);
 
-static int RrcMine(string capturePath, string libDir, string? jsonOut)
+static int RrcMine(string capturePath, string libDir, string? jsonOut, bool vpConstDetail = false)
 {
     if (!File.Exists(capturePath)) { Console.Error.WriteLine($"no such file: {capturePath}"); return 1; }
     if (!Directory.Exists(libDir)) { Console.Error.WriteLine($"not a directory: {libDir}"); return 1; }
@@ -1108,7 +1205,7 @@ static int RrcMine(string capturePath, string libDir, string? jsonOut)
             try { foreach (var ins in RsxFp.Decode(withUcode.d.FpUcode!).Instrs.Where(i => i.Const != null)) fragC[ins.ConstIndex] = ins.Const!; }
             catch { }
 
-        bool detail = g.Key.Kind is "SHADOW" or "DEPTH";
+        bool detail = g.Key.Kind is "SHADOW" or "DEPTH" || vpConstDetail;
         Console.WriteLine($"{g.Key.Kind,-6} VP={g.Key.vp}  FP={g.Key.fp}   {members.Count} draws  (RT {members[0].d.Rs.SurfaceW}x{members[0].d.Rs.SurfaceH}, vp {members[0].d.Rs.ViewportW}x{members[0].d.Rs.ViewportH})");
         Console.WriteLine($"       vp frame c[]:    {string.Join(" ", frameRefs)}");
         Console.WriteLine($"       vp per-draw c[]: {string.Join(" ", drawRefs)}{(members.Any(x => x.indexed) ? " +bone[A+n]" : "")}");

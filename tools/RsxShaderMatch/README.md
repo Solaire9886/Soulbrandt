@@ -17,8 +17,9 @@ dotnet run --project tools/RsxShaderMatch -- verify    mounted/shader ~/.cache/r
 dotnet run --project tools/RsxShaderMatch -- rrc       ~/.config/rpcs3/captures/<frame>.rrc.gz
 dotnet run --project tools/RsxShaderMatch -- rrc-draws ~/.config/rpcs3/captures/<frame>.rrc.gz mounted/shader [--only=N] [--grep=substr]
 dotnet run --project tools/RsxShaderMatch -- rrc-fog   ~/.config/rpcs3/captures/<frame>.rrc.gz
-dotnet run --project tools/RsxShaderMatch -- rrc-mine  ~/.config/rpcs3/captures/<frame>.rrc.gz mounted/shader [--json=out.json]
+dotnet run --project tools/RsxShaderMatch -- rrc-mine  ~/.config/rpcs3/captures/<frame>.rrc.gz mounted/shader [--json=out.json] [--vpc]
 dotnet run --project tools/RsxShaderMatch -- rrc-shadow ~/.config/rpcs3/captures/<frame>.rrc.gz mounted/shader
+dotnet run --project tools/RsxShaderMatch -- rrc-tex   ~/.config/rpcs3/captures/<frame>.rrc.gz mounted/shader [--grep=substr] [--only=N]
 ```
 
 `--vertex` switches `match`/`verify`/`coverage` to the vertex-program pass (Stage 5).
@@ -252,7 +253,10 @@ missing Mie weight - see `docs/context.md` part 35.
 `SET_VIEWPORT_*`. It classifies each draw's pass (COLOR / DEPTH / SHADOW = depth-only + square
 RT) and attributes every constant register to the **VP microcode that references it**
 (`ConstRefs`, not upload history), per-frame vs per-draw, plus the FP inline constants per
-shader group. Across eight captures: shadows go to a 2048x2048 Z24S8 surface as 4x 1024x1024
+shader group. `--vpc` additionally dumps the VP frame-constant *values* for every COLOR group
+(not just SHADOW/DEPTH) - used to recover the scattering constants `c103` (fog begin / range),
+`c104` (extinction β) and `c106 == 1/c104` (the per-channel in-scatter normalisation),
+`docs/context.md` part 46. Across eight captures: shadows go to a 2048x2048 Z24S8 surface as 4x 1024x1024
 tiles; the light matrices are `c[0..3]` (cast) and `c[112..115]` (`*_Sdw` receive). See
 `docs/context.md` part 37.
 
@@ -266,3 +270,11 @@ laid out 4-per-row as candidate matrices. Established DeS's shadows as 4-split P
 bound FP reads input attribute `FOGC` (`RsxFp.Fingerprint.InputMask` bit 3). Across eight
 captures: fog methods never issued, 0 of ~22 000 draws read `FOGC`. RSX fixed-function fog is
 unused by DeS - `des_fog()` models a dead mechanism. See `docs/context.md` part 36.
+
+`rrc-tex` dumps per-fragment-texture-unit state at each draw from `NV4097_SET_TEXTURE_FORMAT`
+(`0x681 + unit*8`), `_ADDRESS` (`0x682`, gamma bits 20-23 / BX2 bits 12-15), `_CONTROL0`
+(`0x683`, enable), `_CONTROL1` (`0x684`, channel remap). Decoders ported from RPCS3's
+`RSXTexture.cpp`. Answered "does DeS sRGB-decode the env cubemap / diffuse / lightmap on
+fetch?" - **no, every unit is `g=0b0000` across ~15 000 HemEnv draws**; DeS's material math is
+in gamma space. Also confirmed the m02 uncompressed env cube (`D8R8G8B8`, alpha forced to 1)
+matches our decode. See `docs/context.md` part 42.
