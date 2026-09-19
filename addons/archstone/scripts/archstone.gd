@@ -17,6 +17,10 @@ var _load_files_dialog: EditorFileDialog
 var _load_folder_dialog: EditorFileDialog
 var _load_map_dialog: EditorFileDialog
 var _loader
+var _sfx_loader
+var _sfx_bank_dialog: EditorFileDialog
+var _sfx_options_dialog: ConfirmationDialog
+var _sfx_preview: Node3D
 
 
 func _enable_plugin() -> void:
@@ -36,14 +40,16 @@ func _enter_tree() -> void:
 	# No EditorSceneFormatImporter for .flver anymore - see docs/ARCHITECTURE.md's Architecture section.
 	# One FlverLoader instance for the whole editor session so its cache persists across loads.
 	_loader = load("res://addons/archstone/scripts/FlverLoader.cs").new()
+	_sfx_loader = load("res://addons/archstone/scripts/SfxLoader.cs").new()
 
 
 func _exit_tree() -> void:
+	_clear_sfx_preview()
 	remove_control_from_container(EditorPlugin.CONTAINER_TOOLBAR, import_button)
 
 	import_button.free()
-	for dialog in [_mount_dialog, _import_scope_dialog, _category_dialog, _clear_confirm_dialog, _progress_dialog, _message_dialog, _load_files_dialog, _load_folder_dialog, _load_map_dialog]:
-		if dialog:
+	for dialog in [_mount_dialog, _import_scope_dialog, _category_dialog, _clear_confirm_dialog, _progress_dialog, _message_dialog, _load_files_dialog, _load_folder_dialog, _load_map_dialog, _sfx_bank_dialog, _sfx_options_dialog]:
+		if is_instance_valid(dialog):
 			dialog.queue_free()
 
 
@@ -63,6 +69,90 @@ func _on_menu_item_pressed(id: int) -> void:
 		_show_message("Cache cleared", "Every previously loaded model will rebuild from source next time it's loaded.")
 	elif id == 6:
 		_show_load_map_dialog()
+	elif id == 7:
+		_show_sfx_bank_dialog()
+
+
+# UI glue only. Parsing, layer association, particles and state stay in C#.
+# Rooted at res://mounted/sfx (via "Import", same as every other Load dialog) - not the raw
+# game folder. AssetExtractor unpacks each .ffxbnd into its own bank-named subfolder there
+# (mounted/sfx/ds_sfxbnd_m01/, mounted/sfx/ds_sfxbnd_commoneffects/, ...), so picking one of
+# those subfolders is the mounted equivalent of picking a plain .ffxbnd used to be.
+func _show_sfx_bank_dialog() -> void:
+	if not _pick_load_target():
+		_show_message("No scene open", "Open a 3D scene before previewing SFX layers.")
+		return
+	if is_instance_valid(_sfx_bank_dialog):
+		_sfx_bank_dialog.queue_free()
+	_sfx_bank_dialog = EditorFileDialog.new()
+	_sfx_bank_dialog.title = "SFX layer preview — select a mounted bank folder (Import first if missing)"
+	_sfx_bank_dialog.file_mode = EditorFileDialog.FILE_MODE_OPEN_DIR
+	_sfx_bank_dialog.access = EditorFileDialog.ACCESS_FILESYSTEM
+	var sfx_dir := ProjectSettings.globalize_path("res://mounted/sfx")
+	if DirAccess.dir_exists_absolute(sfx_dir):
+		_sfx_bank_dialog.current_dir = sfx_dir
+	_sfx_bank_dialog.dir_selected.connect(_show_sfx_options)
+	EditorInterface.get_base_control().add_child(_sfx_bank_dialog)
+	_sfx_bank_dialog.popup_centered_ratio(0.7)
+
+
+func _show_sfx_options(bank_path: String) -> void:
+	var ids = _sfx_loader.GetEffectIds(bank_path)
+	if ids.is_empty():
+		_show_message("SFX bank unavailable", _sfx_loader.LastError if not _sfx_loader.LastError.is_empty() else "This bank has no effect definitions.")
+		return
+	if is_instance_valid(_sfx_options_dialog):
+		_sfx_options_dialog.queue_free()
+	_sfx_options_dialog = ConfirmationDialog.new()
+	_sfx_options_dialog.title = "SFX billboard preview"
+	_sfx_options_dialog.ok_button_text = "View VFX"
+	var box := VBoxContainer.new()
+	var explanation := Label.new()
+	explanation.text = "Playback and Copy Accuracy Report are in the inspector.\nSupported distance variants and emission schedules are decoded.\nUnsupported recipes are listed in the accuracy report.\nSession-only, at the selected node: not saved with the scene.\n%d definitions in this bank; missing IDs also check commoneffects." % ids.size()
+	box.add_child(explanation)
+	var id_label := Label.new()
+	id_label.text = "Effect ID (512 = item glow; m01 bank 91000 = dry ice)"
+	box.add_child(id_label)
+	var effect_id := SpinBox.new()
+	effect_id.max_value = 999999999
+	effect_id.value = 512 if 512 in ids else ids[0]
+	box.add_child(effect_id)
+	_sfx_options_dialog.add_child(box)
+	_sfx_options_dialog.confirmed.connect(func():
+		var target := _pick_load_target()
+		if not target:
+			return
+		# Do not parent the replacement under the old preview selected in the inspector.
+		if is_instance_valid(_sfx_preview) and (target == _sfx_preview or _sfx_preview.is_ancestor_of(target)):
+			target = _sfx_preview.get_parent() as Node3D
+		if not target:
+			return
+		# Old preview materials retain their textures if the replacement fails.
+		_sfx_loader.ClearCache()
+		var preview = _sfx_loader.InstantiateLayerPreview(bank_path, int(effect_id.value), 32, -1)
+		if not preview:
+			_show_message("SFX preview failed", _sfx_loader.LastError)
+			return
+		if preview.LayerCount == 0:
+			_show_message("No supported layers", preview.Diagnostics)
+			preview.free()
+			return
+		_clear_sfx_preview()
+		_sfx_preview = preview
+		target.add_child(preview)
+		preview.Playing = true
+		# Intentionally no owner: these are disposable session previews, not saved assets.
+		EditorInterface.edit_node(preview)
+	)
+	EditorInterface.get_base_control().add_child(_sfx_options_dialog)
+	_sfx_options_dialog.popup_centered()
+
+
+func _clear_sfx_preview() -> void:
+	if is_instance_valid(_sfx_preview):
+		_sfx_preview.Playing = false
+		_sfx_preview.queue_free()
+	_sfx_preview = null
 
 
 func _show_mount_dialog() -> void:
