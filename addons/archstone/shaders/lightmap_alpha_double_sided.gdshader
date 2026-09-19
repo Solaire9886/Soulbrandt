@@ -1,8 +1,9 @@
 shader_type spatial;
-render_mode unshaded;
+render_mode unshaded, cull_disabled;
 
-// "_Alp" lightmapped materials (soft alpha blend, e.g. translucent hair/cloth with baked
-// lighting) - see lightmap.gdshader's header for why this needs its own file.
+// Identical to lightmap_alpha.gdshader except cull_disabled - see lightmap_double_sided.gdshader's
+// header for why this needs its own file and where the back-face shading fix actually lives
+// (hemisphere_pixel_normal, hemisphere_ambient.gdshaderinc).
 #include "lightmap_common.gdshaderinc"
 
 void vertex() {

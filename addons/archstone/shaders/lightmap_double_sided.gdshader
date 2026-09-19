@@ -1,9 +1,18 @@
 shader_type spatial;
-render_mode unshaded;
+render_mode unshaded, cull_disabled;
 
-// "_Alp" lightmapped materials (soft alpha blend, e.g. translucent hair/cloth with baked
-// lighting) - see lightmap.gdshader's header for why this needs its own file.
+// Identical to lightmap.gdshader except cull_disabled - see FlverModelBuilder's
+// FLVER0.Mesh.CullBackfaces handling. Cull mode is a compile-time render_mode keyword on
+// ShaderMaterial (no per-instance property like StandardMaterial3D.CullMode), so a
+// double-sided mesh on this shader family needs its own file - the same reason blend_mix vs
+// blend_add already needed separate files. Covers g_BlendMode Opaque/AlphaTest (the two
+// modes lightmap.gdshader itself handles) - e.g. m2304b0's stained-glass windows in Doran's
+// Mausoleum, meant to be visible from inside the room. The back-face normal flip that makes
+// this shade correctly from either side lives in hemisphere_pixel_normal
+// (hemisphere_ambient.gdshaderinc), not here.
 #include "lightmap_common.gdshaderinc"
+
+uniform float alpha_scissor_threshold : hint_range(0.0, 1.0) = 0.0;
 
 void vertex() {
 	// Varyings can't be assigned from a helper, so each entry point sets the TBN + world pos itself.
@@ -21,4 +30,5 @@ void fragment() {
 	vec3 color = lightmap_shade(UV, UV2, COLOR.rgb, view_dir, view_distance, FRONT_FACING);
 	ALBEDO = des_output(color, view_distance, view_dir);
 	ALPHA = texture(diffuse, scroll_uv(UV)).a;
+	ALPHA_SCISSOR_THRESHOLD = alpha_scissor_threshold;
 }

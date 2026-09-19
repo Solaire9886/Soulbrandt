@@ -66,10 +66,18 @@ public partial class FlverModelBuilder : RefCounted
 	private readonly Shader _lightmapAlphaShader = GD.Load<Shader>("res://addons/archstone/shaders/lightmap_alpha.gdshader");
 	private readonly Shader _lightmapAddShader = GD.Load<Shader>("res://addons/archstone/shaders/lightmap_add.gdshader");
 	private readonly Shader _lightmapSubShader = GD.Load<Shader>("res://addons/archstone/shaders/lightmap_sub.gdshader");
+	// cull_disabled siblings for FLVER0.Mesh.CullBackfaces=false meshes (e.g. m2304b0's stained-glass
+	// windows in Doran's Mausoleum) - cull mode is a compile-time render_mode keyword here too, same
+	// reason the four shaders above are separate files instead of one. Only Opaque/AlphaTest
+	// (_lightmapShader) and AlphaBlend (_lightmapAlphaShader) have any double-sided meshes in the
+	// corpus (457/23 respectively) - Add/Sub don't need one yet.
+	private readonly Shader _lightmapDoubleSidedShader = GD.Load<Shader>("res://addons/archstone/shaders/lightmap_double_sided.gdshader");
+	private readonly Shader _lightmapAlphaDoubleSidedShader = GD.Load<Shader>("res://addons/archstone/shaders/lightmap_alpha_double_sided.gdshader");
 	// Unlit materials whose UV scrolls - StandardMaterial3D covers everything else about them
 	// but can't animate a UV at all. Same compile-time blend_mix/blend_add split as above.
 	private readonly Shader _vfxScrollShader = GD.Load<Shader>("res://addons/archstone/shaders/vfx_scroll.gdshader");
 	private readonly Shader _vfxScrollAddShader = GD.Load<Shader>("res://addons/archstone/shaders/vfx_scroll_add.gdshader");
+	private readonly Shader _skyShader = GD.Load<Shader>("res://addons/archstone/shaders/sky.gdshader");
 
 	// Index of mounted/mtd/*.mtd by filename - only the water shader needs real .mtd data
 	// (per-material wave/reflection tuning has no equivalent in FLVER0's own material data).
@@ -262,8 +270,9 @@ public partial class FlverModelBuilder : RefCounted
 		// hint_default_white lightmap is the correct stand-in for that with no shadow system,
 		// and it lands about 2.3x brighter than an equivalent lightmapped surface, not blown out.
 		//
-		// Only type 0 (unlit) stays behind: sky domes, ghost/dissolve and additive VFX genuinely
-		// have no lighting response and belong on StandardMaterial3D/vfx_scroll.
+		// Only type 0 (unlit) stays off the lit shader family: ghost/dissolve and additive VFX
+		// (StandardMaterial3D / vfx_scroll), plus opaque sky-dome backdrops (sky.gdshader - the
+		// output stage minus lighting, routed in BuildStandardMaterial, see IsSkyDome).
 		bool isShaderLit = !isWater && !isBlend
 			&& (shading.LightingType == 1 || shading.LightingType == 3);
 
@@ -273,15 +282,16 @@ public partial class FlverModelBuilder : RefCounted
 				? BuildBlendMaterial(flverMaterial, flverPath)
 				: isShaderLit
 					? BuildLightmapMaterial(flverMaterial, flverPath,
-						shading.LightingType == 1 ? HemDir3 : HemEnv)
+						shading.LightingType == 1 ? HemDir3 : HemEnv, cullBackfaces)
 					: BuildStandardMaterial(flverMaterial, flverPath);
 
-		// FLVER0's own CullBackfaces=false ("can be seen through from behind", e.g. glass
-		// panes) was being parsed and then never applied anywhere - root cause of m2304b0's
-		// "standglass" windows rendering single-sided on the wrong face. Only StandardMaterial3D
-		// has a real per-instance cull property; ShaderMaterial's cull mode is a compile-time
-		// render_mode, so lightmap/blend/water materials don't get this yet (338 meshes
-		// game-wide affected on the lightmap path - see docs/ARCHITECTURE.md's "Known deferred work").
+		// FLVER0's own CullBackfaces=false ("can be seen through from behind", e.g. glass panes,
+		// m2304b0's stained-glass windows in Doran's Mausoleum) was being parsed and then never
+		// applied anywhere - StandardMaterial3D has a real per-instance cull property, so that half
+		// is just a property set. BuildLightmapMaterial handles its own family above (a compile-time
+		// render_mode keyword needs a whole sibling shader, not a property - see
+		// lightmap_double_sided.gdshader); blend/water still don't (0/1 meshes affected game-wide,
+		// not worth a sibling shader yet - see docs/ARCHITECTURE.md's "Known deferred work").
 		if (!cullBackfaces && mat is StandardMaterial3D std)
 			std.CullMode = BaseMaterial3D.CullModeEnum.Disabled;
 
@@ -534,6 +544,8 @@ public partial class FlverModelBuilder : RefCounted
 		var shading = ResolveMtdShading(flverMaterial);
 		if (shading.NeedsUnlitScrollShader)
 			return BuildUnlitScrollMaterial(flverMaterial, flverPath, shading);
+		if (IsSkyDome(flverMaterial, shading))
+			return BuildSkyMaterial(flverMaterial, flverPath, shading);
 
 		var mat = new StandardMaterial3D();
 
@@ -581,11 +593,35 @@ public partial class FlverModelBuilder : RefCounted
 				mat.BlendMode = BaseMaterial3D.BlendModeEnum.Sub;
 				break;
 		}
-		// g_LightingType=0 (sky domes, ghost/dissolve, additive VFX) means no dynamic lighting
-		// at all in the source engine - see docs/ARCHITECTURE.md's Architecture section.
+		// g_LightingType=0 (ghost/dissolve, additive VFX - opaque sky domes are intercepted above
+		// by IsSkyDome) means no dynamic lighting at all in the source engine.
 		if (shading.IsUnlit)
 			mat.ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded;
 
+		return mat;
+	}
+
+	// Sky-dome backdrops (m02's m9999B0, plus the a03_sky* / m_sky* family): g_LightingType=0 and
+	// opaque, with "sky" in the .mtd name. The ghost/dissolve and additive-VFX materials that also
+	// carry g_LightingType=0 don't match either clause. DeS runs sky domes through the same fog +
+	// exposure epilogue as lit geometry (their DS_Phn_ColDif shader), so they get sky.gdshader +
+	// output_stage.gdshaderinc rather than a raw unshaded StandardMaterial3D. See docs/context.md
+	// part 45.
+	private static bool IsSkyDome(FLVER0.Material mat, MtdShading shading) =>
+		shading.IsUnlit && shading.BlendMode == DesBlendMode.Opaque
+		&& System.IO.Path.GetFileName(mat.MTD.Replace('\\', '/')).ToLower().Contains("sky");
+
+	// sky.gdshader = the diffuse backdrop through output_stage's des_fog (FOG_BANK distance fade) +
+	// des_tonemap (exposure) + des_tone_correct. FogID/ToneMapID/ToneCorrectID land via
+	// FlverLoader.ApplyDrawParams (the shader carries `tone_key`, so its wantsOutputStage gate
+	// fires). Per-vertex H&P scatter is deliberately left out - see sky.gdshader's header.
+	private ShaderMaterial BuildSkyMaterial(FLVER0.Material flverMaterial, string flverPath, MtdShading shading)
+	{
+		var mat = new ShaderMaterial { Shader = _skyShader };
+		var tex = ResolveTexture(flverMaterial, "g_Diffuse", flverPath);
+		if (tex != null) mat.SetShaderParameter("diffuse", tex);
+		mat.SetShaderParameter("diffuse_tint", shading.Tint);
+		mat.SetShaderParameter("tex_scroll_0", shading.TexScroll0);
 		return mat;
 	}
 
@@ -602,7 +638,8 @@ public partial class FlverModelBuilder : RefCounted
 	// material family reads a different subset of it and positional tuples got unreadable.
 	private readonly record struct MtdShading(
 		float Roughness, int LightingType, Color Tint, DesBlendMode BlendMode, Vector2 TexScroll0,
-		Vector2 TexScroll1, int EnvSpcSlot, string ShaderFamily, string ShaderFeatures, float SpecularPower)
+		Vector2 TexScroll1, int EnvSpcSlot, string ShaderFamily, string ShaderFeatures, float SpecularPower,
+		Color SpecularTint)
 	{
 		// 0 = no lighting response at all (sky domes, ghost/dissolve, additive VFX). Kept as a
 		// derived property so the many existing call sites reading IsUnlit are unaffected.
@@ -612,7 +649,7 @@ public partial class FlverModelBuilder : RefCounted
 		// Empty ShaderFamily/ShaderFeatures mean "the .mtd couldn't be read", which ClassifyMaterial
 		// treats as "fall back to the old texture-slot heuristics" rather than "no features".
 		public static readonly MtdShading Defaults =
-			new(1.0f, 1, Colors.White, DesBlendMode.Opaque, Vector2.Zero, Vector2.Zero, -1, "", "", 8.0f);
+			new(1.0f, 1, Colors.White, DesBlendMode.Opaque, Vector2.Zero, Vector2.Zero, -1, "", "", 8.0f, Colors.White);
 
 		// Whether this material needs the vfx_scroll shader family instead of StandardMaterial3D:
 		// an animated UV, which StandardMaterial3D can't express at all. Gated on IsUnlit because
@@ -650,16 +687,18 @@ public partial class FlverModelBuilder : RefCounted
 				float specularPower = GetMtdFloat(mtd, "g_SpecularPower", 8.0f);
 				float roughness = Mathf.Clamp(Mathf.Sqrt(2.0f / (specularPower + 2.0f)), 0.05f, 1.0f);
 
-				// g_DiffuseMapColor is a real per-material tint (568/584 mtds leave it white,
-				// a no-op, but a real minority - light shafts, thunder VFX, the Wanderer ghost
-				// effect - don't). g_DiffuseMapColorPower genuinely varies (0-7 game-wide, not
-				// a fixed authoring constant) and is applied as a real exponent, not ignored.
+				// g_DiffuseMapColorPower is a plain intensity MULTIPLIER, not an exponent - see
+				// ARCHITECTURE.md's "g_DiffuseMapColor/g_DiffuseMapColorPower" entry for the
+				// Japanese-description evidence and the live-capture confirmation. Not clamped to
+				// 1.0 - every consumer uniform is `: source_color` and multiplies against the
+				// sampled texture in-shader, so a >1 tint legitimately brightens unsaturated texture
+				// data; clamping here would reintroduce the no-op bug this replaces.
 				var tint = GetMtdColor3(mtd, "g_DiffuseMapColor", Colors.White);
 				float power = GetMtdFloat(mtd, "g_DiffuseMapColorPower", 1.0f);
 				tint = new Color(
-					Mathf.Pow(Mathf.Clamp(tint.R, 0f, 1f), power),
-					Mathf.Pow(Mathf.Clamp(tint.G, 0f, 1f), power),
-					Mathf.Pow(Mathf.Clamp(tint.B, 0f, 1f), power));
+					Mathf.Max(0f, tint.R * power),
+					Mathf.Max(0f, tint.G * power),
+					Mathf.Max(0f, tint.B * power));
 
 				// g_LightingType corpus-scanned 2026-08-18 (612 mtds): a clean three-way split,
 				// 1=Phong (chr/parts metal/leather), 3=HemEnv (lightmap/blend), 0=every sky dome
@@ -684,11 +723,26 @@ public partial class FlverModelBuilder : RefCounted
 				string family = shader == null ? "" : (string)shader["family"];
 				string features = shader == null ? "" : (string)shader["features"];
 
+				// g_SpecularMapColor * g_SpecularMapColorPower - the HemEnv env-cubemap specular
+				// term's own material tint/intensity multiplier (Cs in the map-shading research
+				// pass's finding #2, MAP_SHADING_ACCURACY_2026_09_15.md - external research
+				// archive, not tracked in this repo), distinct from the Phong
+				// exponent g_SpecularPower above. BuildWaterMaterial already reads the same two
+				// params for its sun glint (glint_color/glint_power); this was the only other
+				// HemEnv-family consumer still missing them - env_specular previously had no
+				// material-level specular scaling at all.
+				var specTint = GetMtdColor3(mtd, "g_SpecularMapColor", Colors.White);
+				float specPower = GetMtdFloat(mtd, "g_SpecularMapColorPower", 1.0f);
+				var specularTint = new Color(
+					Mathf.Max(0f, specTint.R * specPower),
+					Mathf.Max(0f, specTint.G * specPower),
+					Mathf.Max(0f, specTint.B * specPower));
+
 				return new MtdShading(
 					roughness, lightingType, tint, (DesBlendMode)GetMtdInt(mtd, "g_BlendMode", 0),
 					GetMtdVector2(mtd, "g_TexScroll_0", Vector2.Zero),
 					GetMtdVector2(mtd, "g_TexScroll_1", Vector2.Zero),
-					GetMtdInt(mtd, "g_EnvSpcSlotNo", -1), family, features, specularPower);
+					GetMtdInt(mtd, "g_EnvSpcSlotNo", -1), family, features, specularPower, specularTint);
 			}
 			catch (Exception) { /* fall through to defaults below */ }
 		}
@@ -702,14 +756,14 @@ public partial class FlverModelBuilder : RefCounted
 	private const int HemEnv = 0;
 	private const int HemDir3 = 1;
 
-	private ShaderMaterial BuildLightmapMaterial(FLVER0.Material flverMaterial, string flverPath, int lightingModel = HemEnv)
+	private ShaderMaterial BuildLightmapMaterial(FLVER0.Material flverMaterial, string flverPath, int lightingModel = HemEnv, bool cullBackfaces = true)
 	{
 		// g_DiffuseMapColor tint only - NOT roughness. Tried and reverted here (see
 		// docs/ARCHITECTURE.md's "Known deferred work") - needs real environment/lighting
 		// groundwork first, not a quick re-guess.
 		var shading = ResolveMtdShading(flverMaterial);
 
-		Shader shader = _lightmapShader;
+		Shader shader = cullBackfaces ? _lightmapShader : _lightmapDoubleSidedShader;
 		float scissorThreshold = 0.0f;
 		switch (shading.BlendMode)
 		{
@@ -717,10 +771,11 @@ public partial class FlverModelBuilder : RefCounted
 				scissorThreshold = 0.5f; // matches StandardMaterial3D's own AlphaScissor default
 				break;
 			case DesBlendMode.AlphaBlend:
-				shader = _lightmapAlphaShader;
+				shader = cullBackfaces ? _lightmapAlphaShader : _lightmapAlphaDoubleSidedShader;
 				break;
 			// No lightmapped mesh in the corpus is additive, but the branch costs nothing and
 			// keeps modded//future assets working; subtractive is real (139 meshes, a04_blood).
+			// Neither has a double-sided sibling yet - see the field declarations above.
 			case DesBlendMode.Additive:
 				shader = _lightmapAddShader;
 				break;
@@ -732,6 +787,7 @@ public partial class FlverModelBuilder : RefCounted
 		var mat = new ShaderMaterial { Shader = shader };
 		mat.SetShaderParameter("lighting_model", lightingModel);
 		mat.SetShaderParameter("specular_power", shading.SpecularPower);
+		mat.SetShaderParameter("specular_tint", shading.SpecularTint);
 
 		bool Assign(string paramName, string uniformName)
 		{
@@ -748,8 +804,9 @@ public partial class FlverModelBuilder : RefCounted
 		// falls back to the interpolated vertex normal rather than decoding an absent texture.
 		mat.SetShaderParameter("use_normal_map", hasNormalMap);
 
-		// Only lightmap.gdshader has this uniform - the blended variants always do real blending.
-		if (shader == _lightmapShader)
+		// Only the Opaque/AlphaTest shaders have this uniform - the blended variants always do
+		// real blending.
+		if (shader == _lightmapShader || shader == _lightmapDoubleSidedShader)
 			mat.SetShaderParameter("alpha_scissor_threshold", scissorThreshold);
 
 		mat.SetShaderParameter("diffuse_tint", shading.Tint);
@@ -804,14 +861,17 @@ public partial class FlverModelBuilder : RefCounted
 		// already-blended diffuse1/diffuse2 result, not per-layer.
 		var shading = ResolveMtdShading(flverMaterial);
 		mat.SetShaderParameter("diffuse_tint", shading.Tint);
+		mat.SetShaderParameter("specular_tint", shading.SpecularTint);
 		mat.SetShaderParameter("tex_scroll_0", shading.TexScroll0);
 		mat.SetShaderParameter("tex_scroll_1", shading.TexScroll1);
 
 		return mat;
 	}
 
-	// Water surfaces (g_Envmap-gated). Unlike other material families, wave/reflection tuning
-	// has no FLVER0 equivalent, so this is the one path that reads the real .mtd file directly.
+	// Water surfaces (g_Envmap-gated). Wave/reflection tuning has no FLVER0 equivalent, so this is
+	// the one path that reads the real .mtd directly - and every param maps onto a DS_Water_Env
+	// shader constant confirmed against RPCS3 captures (docs/context.md part 50). water.gdshader
+	// documents the shader-side meaning of each.
 	private ShaderMaterial BuildWaterMaterial(FLVER0.Material flverMaterial, string flverPath)
 	{
 		var mat = new ShaderMaterial { Shader = _waterShader };
@@ -822,7 +882,8 @@ public partial class FlverModelBuilder : RefCounted
 			if (tex != null) mat.SetShaderParameter(uniformName, tex);
 		}
 		Assign("g_Bumpmap", "bumpmap");
-		Assign("g_Envmap", "envmap");
+		// g_Envmap is a cubemap (sampled by a reflection vector in DS_Water_Env), not a 2D image.
+		mat.SetShaderParameter("envmap", ResolveWaterEnvCube(flverMaterial, flverPath) ?? FallbackWaterCube);
 
 		// Falls back to the shader's own defaults if the .mtd can't be found/parsed.
 		string mtdName = System.IO.Path.GetFileName(flverMaterial.MTD.Replace('\\', '/'));
@@ -831,12 +892,14 @@ public partial class FlverModelBuilder : RefCounted
 			try
 			{
 				var mtd = MTD.Read(mtdPath);
-				mat.SetShaderParameter("tile_scale_0", GetMtdVector2(mtd, "g_TileScale_0", Vector2.One));
-				mat.SetShaderParameter("tile_scale_1", GetMtdVector2(mtd, "g_TileScale_1", Vector2.One));
-				mat.SetShaderParameter("tile_scale_2", GetMtdVector2(mtd, "g_TileScale_2", Vector2.One));
-				mat.SetShaderParameter("tex_scroll_0", GetMtdVector2(mtd, "g_TexScroll_0", Vector2.Zero));
-				mat.SetShaderParameter("tex_scroll_1", GetMtdVector2(mtd, "g_TexScroll_1", Vector2.Zero));
-				mat.SetShaderParameter("tex_scroll_2", GetMtdVector2(mtd, "g_TexScroll_2", Vector2.Zero));
+				// g_TileScale_i is a Float2: .x = base-UV tiling, .y = this octave's speed multiplier
+				// on flow_dir. Fed straight through - the old `wave_detail_scale` fudge is gone.
+				mat.SetShaderParameter("tile_scale_0", GetMtdVector2(mtd, "g_TileScale_0", new Vector2(1.0f, 0.1f)));
+				mat.SetShaderParameter("tile_scale_1", GetMtdVector2(mtd, "g_TileScale_1", new Vector2(1.0f, 0.1f)));
+				mat.SetShaderParameter("tile_scale_2", GetMtdVector2(mtd, "g_TileScale_2", new Vector2(1.0f, 0.1f)));
+				// Only g_TexScroll_0 is ever set; it's the shared flow VELOCITY - the shader uses it
+				// raw (its magnitude is the base scroll speed), scaled per-octave by tile_scale_i.y.
+				mat.SetShaderParameter("flow_dir", GetMtdVector2(mtd, "g_TexScroll_0", new Vector2(0.05f, 0.0f)));
 				mat.SetShaderParameter("tile_blend_0", GetMtdFloat(mtd, "g_TileBlend_0", 1.0f));
 				mat.SetShaderParameter("tile_blend_1", GetMtdFloat(mtd, "g_TileBlend_1", 0.0f));
 				mat.SetShaderParameter("tile_blend_2", GetMtdFloat(mtd, "g_TileBlend_2", 0.0f));
@@ -850,11 +913,16 @@ public partial class FlverModelBuilder : RefCounted
 				mat.SetShaderParameter("fresnel_scale", GetMtdFloat(mtd, "g_FresnelScale", 1.0f));
 				mat.SetShaderParameter("fresnel_color", GetMtdColor3(mtd, "g_FresnelColor", Colors.White));
 				mat.SetShaderParameter("water_fade_begin", GetMtdFloat(mtd, "g_WaterFadeBegin", 0.5f));
-				// Real per-material value (-0.5 to 1 game-wide), previously unread despite
-				// this being the one path that already reads every other water .mtd param -
-				// see water.gdshader for how it's applied (an uncalibrated guess at intent,
-				// same category as wave_detail_scale/refraction_scale in that file).
+				// g_BumpMapSmoose (c[9].x) - a bias added to the summed wave normal's Z: negative
+				// => choppier, positive => flatter. Not an xy strength scale.
 				mat.SetShaderParameter("bump_smoose", GetMtdFloat(mtd, "g_BumpMapSmoose", 1.0f));
+				// Sun-glint weight (c[39]) - previously a fixed x2 fudge. Cross-checked against
+				// three captures (docs/context.md part 50 follow-up): c[39] == g_SpecularMapColor *
+				// g_SpecularMapColorPower, times the scene's own sun colour (already applied
+				// separately in water.gdshader via scatter_sun_color) - so only the material's own
+				// two factors are bound here.
+				mat.SetShaderParameter("glint_color", GetMtdColor3(mtd, "g_SpecularMapColor", Colors.White));
+				mat.SetShaderParameter("glint_power", GetMtdFloat(mtd, "g_SpecularMapColorPower", 2.0f));
 			}
 			catch (Exception) { /* keep shader defaults */ }
 		}
@@ -920,6 +988,55 @@ public partial class FlverModelBuilder : RefCounted
 		}
 		_cubemapCache[key] = cube;
 		return cube;
+	}
+
+	// A water material's g_Envmap texture, decoded as a cubemap - same resolution walk as
+	// ResolveTexture (OwnModelDir -> RefPathDir -> sibling map area -> ...), but the TPF entry must
+	// be a real TexType.Cubemap. Returns null if the reference or the cube can't be resolved;
+	// BuildWaterMaterial then binds FallbackWaterCube so the screen-space reflection still shows.
+	private readonly Dictionary<string, Cubemap?> _waterCubeCache = new();
+
+	private Cubemap? ResolveWaterEnvCube(FLVER0.Material flverMaterial, string flverPath)
+	{
+		var texRef = flverMaterial.Textures.FirstOrDefault(t => t.ParamName == "g_Envmap");
+		if (texRef == null || string.IsNullOrEmpty(texRef.Path)) return null;
+		string key = System.IO.Path.GetFileNameWithoutExtension(texRef.Path.Replace('\\', '/'));
+		if (_waterCubeCache.TryGetValue(key, out var cached)) return cached;
+
+		Cubemap? cube = null;
+		foreach (var dir in CandidateDirs(flverMaterial, texRef, flverPath))
+		{
+			if (dir == null) continue;
+			if (GetMergedTextures(dir).TryGetValue(key, out var tpfTex) && tpfTex.Type == TPF.TexType.Cubemap)
+			{
+				try { cube = DecodeCubemap(tpfTex); }
+				catch (Exception e) { GD.PushWarning($"Water cubemap '{key}' failed to decode: {e.Message}"); }
+				break;
+			}
+		}
+		_waterCubeCache[key] = cube;
+		return cube;
+	}
+
+	// Dim neutral cube for water whose g_Envmap didn't resolve - keeps the reflection term from
+	// collapsing to black (which would read darker than the old flat-image matcap did).
+	private static Cubemap? _fallbackWaterCube;
+	private static Cubemap FallbackWaterCube
+	{
+		get
+		{
+			if (_fallbackWaterCube != null) return _fallbackWaterCube;
+			var faces = new Godot.Collections.Array<Image>();
+			for (int i = 0; i < 6; i++)
+			{
+				var img = Image.CreateEmpty(4, 4, false, Image.Format.Rgb8);
+				img.Fill(new Color(0.45f, 0.5f, 0.55f));
+				faces.Add(img);
+			}
+			_fallbackWaterCube = new Cubemap();
+			_fallbackWaterCube.CreateFromImages(faces);
+			return _fallbackWaterCube;
+		}
 	}
 
 	// Pfim has no concept of a cubemap - handed a 6-face DDS it silently decodes face 0 only

@@ -42,27 +42,42 @@ void vertex() {
 }
 
 void fragment() {
-	// COLOR.a is the blend weight, not .r/g/b - see docs/ARCHITECTURE.md's terrain-blend entry
-	// for why. COLOR.r (=g=b) is a real signal too (only two discrete values per mesh) but
-	// isn't AO/shading - tried in ALBEDO and reverted, still unknown, deliberately left unused.
+	// COLOR.a is the blend weight; COLOR.rgb is a second, independent signal - native HemEnv
+	// Mul-family programs (DS_Phn_Dif______MulLitSdw_HemEnv and the DifSpc sibling) multiply the
+	// interpolated diffuse AND the blended RGB specular by vertex colour, same free multiplier
+	// role the single-layer family's vertex colour plays. See the map-shading research pass's
+	// finding #3 (MAP_SHADING_ACCURACY_2026_09_15.md - external research archive, not tracked
+	// in this repo) - the earlier "unknown, deliberately unused" read (an ALBEDO-only
+	// experiment, not this multiplicative role) was wrong.
 	float blend = COLOR.a;
 	vec2 uv1 = UV + tex_scroll_0 * TIME;
 	vec2 uv2 = UV2 + tex_scroll_1 * TIME;
-	vec3 diffuse_color = mix(texture(diffuse1, uv1).rgb, texture(diffuse2, uv2).rgb, blend) * diffuse_tint;
+	vec3 diffuse_color = mix(texture(diffuse1, uv1).rgb, texture(diffuse2, uv2).rgb, blend) * diffuse_tint * COLOR.rgb;
 	vec3 lm = texture(lightmap, lightmap_uv).rgb;
-	// Scalar + untinted, unlike the single-layer family: this family's vertex colour is the
-	// layer-blend weight, not a free multiplier (see the terrain-blend note in docs/ARCHITECTURE.md).
-	float spec = mix(texture(specular1, uv1).r, texture(specular2, uv2).r, blend);
+	// RGB, not just red - the native HemEnv specular term uses the whole sampled colour (see
+	// lightmap_common.gdshaderinc's identical note).
+	vec3 spec = mix(texture(specular1, uv1).rgb, texture(specular2, uv2).rgb, blend);
 	// ponytail: linear mix of two tangent-space normal maps, not a proper renormalized blend.
 	vec3 sampled_normal = mix(texture(normal1, uv1).rgb, texture(normal2, uv2).rgb, blend);
-	vec3 pixel_normal = hemisphere_pixel_normal(decode_normal_map(sampled_normal.xy));
+	// This shader has no double-sided variant yet (0 such meshes in the corpus), but FRONT_FACING
+	// is free to pass here - it's a direct call from fragment(), not through another helper.
+	vec3 pixel_normal = hemisphere_pixel_normal(decode_normal_map(sampled_normal.xy), FRONT_FACING);
 	vec3 camera_position = INV_VIEW_MATRIX[3].xyz;
 	vec3 view_dir = normalize(camera_position - world_position);
 	// Radial camera distance - the scattering model uses the true distance, not a planar depth.
 	float view_distance = length(world_position - camera_position);
 
 	// envSpc added straight in, not routed through EMISSION - this shader is unshaded.
-	vec3 color = diffuse_color * (hemisphere_ambient(pixel_normal) + env_diffuse(pixel_normal, lm))
-		+ env_specular(pixel_normal, view_dir, lm, vec3(spec), vec3(1.0));
+	// Gate is DeS's min(shadow, lightmap); the hemisphere floor stays ungated.
+	vec3 gate = min(sun_shadow(world_position, view_distance), lm);
+	// No fixed 0.6 here - that was a duplicate of the material's own g_DiffuseMapColorPower
+	// (already folded into diffuse_tint), not a real engine constant. See the map-shading
+	// research pass's finding #1 (MAP_SHADING_ACCURACY_2026_09_15.md - external research
+	// archive, not tracked in this repo); lightmap_common.gdshaderinc had the same bug. The
+	// env_specular tint argument is COLOR.rgb above, not the diffuse factor.
+	// Not shadow-gated - a torch/campfire isn't occluded by the sun's shadow map.
+	vec3 point_lights = point_lights_diffuse(world_position, pixel_normal);
+	vec3 color = diffuse_color * (hemisphere_ambient(pixel_normal) + env_diffuse(pixel_normal, gate) + point_lights)
+		+ env_specular(pixel_normal, view_dir, gate, spec, COLOR.rgb);
 	ALBEDO = des_output(color, view_distance, view_dir);
 }
