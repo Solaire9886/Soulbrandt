@@ -6,7 +6,7 @@ Operating instructions for any AI coding agent working in this repository; the s
 
 - **`docs/ARCHITECTURE.md`** is the canonical reference for this project — what it is, current conventions, format quirks, known gotchas, the standing stability/resource-safety priority, and known deferred work. Read it before making non-trivial changes here. It's written for any contributor, not just Claude Code — there's nothing Claude-specific about it.
 - **`docs/PLAN.md`** has the roadmap — why things are built this way and what's coming.
-- **`docs/context.md`** has the session-by-session investigation history: the real bugs already found and fixed (with how they were confirmed, not just guessed), C#/Godot interop gotchas, this machine's environment quirks, and dead ends already tried and rejected. Optional, but worth checking before re-trying something that looks like an obvious fix.
+- **`docs/context.md`** has the investigation history: standing lessons, how each finding was confirmed, C#/Godot interop gotchas, this machine's environment quirks, and dead ends already tried and rejected. Check it before re-trying something that looks like an obvious fix.
 
 ## Build & verify, quick reference
 

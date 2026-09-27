@@ -32,7 +32,7 @@ captured or not).
 
 ## Why
 
-Every shader investigation so far (`docs/context.md` parts 11-33) traced
+Every earlier shader investigation (`docs/context.md`, "Map lighting and the output stage") traced
 **anonymous** programs - "FragmentProgram151 is a lightmapped HemEnv map piece"
 was an inference that cost a whole session. Meanwhile `shader/ds_flver.shaderbnd`
 holds all **1215 fragment + 134 vertex programs with their real dev names as
@@ -52,7 +52,7 @@ is the complete corpus. Captures are a calibration/label set, not the coverage.
 |---|---|---|
 | Named library binaries | `mounted/shader/ds_flver/`, `ds_filter/`, ... | 1421 files, extracted 2026-08-28 |
 | RPCS3 shader-log captures | `~/.cache/rpcs3/shaderlog/` | 423 `FragmentProgramN.spirv` + 212 `VertexProgramN.spirv`; despite the extension they are plain GLSL 450 text |
-| RPCS3 RSX frame capture | `~/.config/rpcs3/captures/BLUS30443_20260817172216_capture.rrc.gz` | one frame, ~37 MB; carries raw microcode **and real CPU constant values** (`c104` etc.) - the source for part 33's unverified scattering constants, a later job |
+| RPCS3 RSX frame capture | `~/.config/rpcs3/captures/BLUS30443_20260817172216_capture.rrc.gz` | one frame, ~37 MB; carries raw microcode **and real CPU constant values** (`c104` etc.); the 2026-08-31 and later captures sit beside it |
 | RPCS3 source (ISA reference) | `~/src/rpcs3/rpcs3/Emu/RSX/Program/` | `CgBinaryFragmentProgram.cpp` / `CgBinaryVertexProgram.cpp` are a working RSX FP/VP disassembler; `FragmentProgramDecompiler.cpp` is the full GLSL decompiler that produced the captures |
 
 ## Stage 1 - container format (done)
@@ -67,8 +67,7 @@ layout in the `CgProgram.cs` doc comment.
 fragment programs every invariant holds (`totalSize == fileLen - cgOffset`,
 `ucodeSize % 16 == 0`, `instructionCount * 16 == ucodeSize`). Validated against the
 known case: `DS_Fil_HDR.fpo` -> 7 instructions, ucode 112 B @ 0x70, matching
-`docs/context.md` part 26's "five instructions" (5 shown in the capture + a
-trailing MOV/END pair).
+the "five instructions" read from the capture (5 real + a trailing MOV/END pair).
 
 Findings worth keeping:
 
@@ -99,7 +98,7 @@ set, inline-constant count, KIL present, FENCT/FENCB present, opcode histogram.
 
 Validated: on all 21 `ds_filter` fragment programs the decoded slot count equals
 the header `instructionCount`. `DS_Fil_HDR` decodes to 5 real instructions + 2
-inline constants, matching `docs/context.md` part 26's independent
+inline constants, matching an independent
 `CgBinaryDisasm` result.
 
 ## Stage 3 - fragment matcher (done)
@@ -123,15 +122,14 @@ several GLSL lines).
 - FENC / KIL agreement, and material-texture count (name) vs 2D sampler count (capture).
 
 Results against the earlier 257-capture shader-log: **HIGH 208, MED 21, LOW 28,
-NONE 0**. The capture set has since grown to 423; `docs/context.md` part 34 has the
-current run (363 HIGH). Written to `fragment-names.json` (regenerate with
+NONE 0**. The capture set has since grown to 423 (363 HIGH). Written to `fragment-names.json` (regenerate with
 `match ... --json=`). `verify` re-checks hand-verified anchors and exits non-zero on
 regression:
 
 | capture | -> | library shader | why it's certain |
 |---|---|---|---|
-| `FragmentProgram151` | | `DS_Phn_Dif______MulLitCsd_HemEnv` | unit-run `[11,3,7,0,6]` exact, const 41 exact; sharper than `context.md` part 18 (names the Csd variant + Dif-only set) |
-| `FragmentProgram11` | | `DS_Phn_DifSpcBmp______Csd_HemDir3` | unit-run `[2,7,1,0]` exact, const 62 exact; confirms part 18's "HemDir3", shows its "terrain blend" label was loose (no `Mul`) |
+| `FragmentProgram151` | | `DS_Phn_Dif______MulLitCsd_HemEnv` | unit-run `[11,3,7,0,6]` exact, const 41 exact; names the Csd variant and the Dif-only set, sharper than the earlier anonymous trace |
+| `FragmentProgram11` | | `DS_Phn_DifSpcBmp______Csd_HemDir3` | unit-run `[2,7,1,0]` exact, const 62 exact; confirms the earlier trace's "HemDir3", shows its "terrain blend" label was loose (no `Mul`) |
 | `FragmentProgram62` | | `DS_Phn_Dif___Bmp___LitSdw_HemEnv` | units 0=dif 2=bump 6=lightmap 7=shadow 11=cube - exact structural correspondence |
 | `FragmentProgram20` | | `DS_Phn_DifSpc_________Sdw_HemDir3PntS` | unit-run exact, const 46 exact (39 for the no-point-light sibling) |
 
@@ -143,7 +141,7 @@ The 28 LOW are honest ambiguities, not scorer failures:
 
 **Also found:** `FragmentProgramN` numbers are **not stable across capture sessions**.
 This matcher names the *current* `~/.cache/rpcs3/shaderlog`; older `context.md`
-entries (parts 11-24) came from an earlier dump with different numbering - e.g. their
+entries came from an earlier dump with different numbering - e.g. their
 `FragmentProgram124` was a bumpmapped HemEnv, this dump's is a small LUT shader.
 
 ## Stage 4 - readable disassembler (done)
@@ -176,9 +174,8 @@ So `HemEnvLerp` = HemEnv with the environment-diffuse term **cross-faded between
 environment cubemaps by a per-draw constant**. Almost certainly an
 environment-lighting *transition* (Nexus state changes as Archdemons fall, world
 tendency, scripted per-area lighting) - which is why free-roaming a static area
-state never triggers it. `context.md` part 18's "lerp toward a constant colour by
-EnvDif cubemap alpha" was wrong on the mechanism (cubemap-to-cubemap, scalar not
-alpha) and came from a differently-numbered capture session anyway.
+state never triggers it. The earlier "lerp toward a constant colour by EnvDif cubemap alpha" reading belongs to
+plain HemEnv, not HemEnvLerp.
 
 ## Stage 5 - vertex programs (`--vertex`, done)
 
@@ -244,9 +241,8 @@ FIFO details in `RrcCapture.cs`; the draw-state replay (including that
 
 **First result:** ran on four outdoor areas (Nexus, Boletaria 1-1, Stonefang 2-1, Shrine
 4-1). The scattering block `c103..c115` came out per-area; `c108`/`c109` are per-channel with
-ratios stable to 3 sig figs across all four (Rayleigh 1:1.30:1.87, Mie 1:1.69:3.50). That
-replaced `output_stage.gdshaderinc`'s fitted `lambda^-1.5` Rayleigh weight and added the
-missing Mie weight - see `docs/context.md` part 35.
+ratios stable to 3 sig figs across all four. (These measured ratios were later superseded by
+computing the constants exactly as the engine does; they also match that computation.)
 
 `rrc-mine` is the "finished interpreter" pass: `RrcInterp` also tracks `SET_SURFACE_FORMAT`/
 `_CLIP` (RT size + depth format), `SET_SURFACE_COLOR_TARGET`, `SET_COLOR_MASK`, `SET_DEPTH_MASK`,
@@ -255,21 +251,20 @@ RT) and attributes every constant register to the **VP microcode that references
 (`ConstRefs`, not upload history), per-frame vs per-draw, plus the FP inline constants per
 shader group. `--vpc` additionally dumps the VP frame-constant *values* for every COLOR group
 (not just SHADOW/DEPTH) - used to recover the scattering constants `c103` (fog begin / range),
-`c104` (extinction β) and `c106 == 1/c104` (the per-channel in-scatter normalisation),
-`docs/context.md` part 46. Across eight captures: shadows go to a 2048x2048 Z24S8 surface as 4x 1024x1024
-tiles; the light matrices are `c[0..3]` (cast) and `c[112..115]` (`*_Sdw` receive). See
-`docs/context.md` part 37.
+`c104` (extinction β) and `c106 == 1/c104` (the per-channel in-scatter normalisation).
+Across eight captures: shadows go to a 2048x2048 Z24S8 surface as 4x 1024x1024
+tiles; the light matrices are `c[0..3]` (cast) and `c[112..115]` (`*_Sdw` receive).
 
 `rrc-shadow` is the focused follow-up: it dumps the SHADOW-pass viewport tiles (origin+extent
 within the 2048² surface), the distinct `c[0..3]` cast matrix per tile, the frame-constant
 registers every `*_Sdw`/`*Csd` receiver references, and the `Sdw` fragment inline constants
 laid out 4-per-row as candidate matrices. Established DeS's shadows as 4-split PSSM in a 2×2
-1024² atlas — see `docs/context.md` part 37 and `docs/PLAN.md`'s shadow item.
+1024² atlas (`docs/ARCHITECTURE.md`, "Sun shadows").
 
 `rrc-fog` replays a frame tracking `SET_FOG_MODE`/`SET_FOG_PARAMS` and, per draw, whether the
 bound FP reads input attribute `FOGC` (`RsxFp.Fingerprint.InputMask` bit 3). Across eight
 captures: fog methods never issued, 0 of ~22 000 draws read `FOGC`. RSX fixed-function fog is
-unused by DeS - `des_fog()` models a dead mechanism. See `docs/context.md` part 36.
+unused by DeS; the FOG_BANK fade is computed in the material programs instead.
 
 `rrc-tex` dumps per-fragment-texture-unit state at each draw from `NV4097_SET_TEXTURE_FORMAT`
 (`0x681 + unit*8`), `_ADDRESS` (`0x682`, gamma bits 20-23 / BX2 bits 12-15), `_CONTROL0`
@@ -277,4 +272,8 @@ unused by DeS - `des_fog()` models a dead mechanism. See `docs/context.md` part 
 `RSXTexture.cpp`. Answered "does DeS sRGB-decode the env cubemap / diffuse / lightmap on
 fetch?" - **no, every unit is `g=0b0000` across ~15 000 HemEnv draws**; DeS's material math is
 in gamma space. Also confirmed the m02 uncompressed env cube (`D8R8G8B8`, alpha forced to 1)
-matches our decode. See `docs/context.md` part 42.
+matches our decode.
+
+Render targets: with RPCS3's colour-buffer write-back, the memory blocks attached to draws hold
+the game's own render targets (scene buffer, bloom intermediates, final frame) as raw
+`A8R8G8B8`; `RrcCapture.Parse(path, keepData: true)` exposes them for pixel comparisons.

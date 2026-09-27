@@ -10,7 +10,10 @@ Read `README.md`'s Disclaimer section. The short version: no proprietary game as
 extracted files, ROMs, or decryption/DRM-bypass methods get posted here — in code,
 issues, PRs, or discussion. Bug reports with in-game screenshots are fine (normal
 practice for this kind of project); uploading or linking raw extracted game files
-(`.flver`, `.tpf`, `.bnd`, `.dcx`, etc.) is not.
+(`.flver`, `.tpf`, `.bnd`, `.dcx`, etc.) is not. The same goes for anything taken from
+the game executable: no disassembly listings, decompiled code, or function addresses.
+Engine behaviour studied from it comes in only as a written specification, under the
+clean-room rule in `docs/ARCHITECTURE.md`.
 
 Then read `docs/ARCHITECTURE.md` (architecture, current conventions, known gotchas) and
 `docs/PLAN.md` (where this is headed and why). These are the actual living documentation for
@@ -41,7 +44,7 @@ example. Don't commit these scratch scripts.
 
 ## What to work on
 
-Check `docs/PLAN.md`'s roadmap and the "Known deferred work" section at the bottom of
+Check `docs/PLAN.md`'s roadmap and the "Known gaps and deferred work" section at the bottom of
 `docs/ARCHITECTURE.md` for what's open — skeleton/animation import and LOD selection are
 real, scoped gaps, not just ideas. If you want to tackle something not listed there,
 open an issue first to talk it through before sinking time into it.
@@ -58,7 +61,7 @@ open an issue first to talk it through before sinking time into it.
 
 ## Reporting bugs
 
-Check `docs/ARCHITECTURE.md`'s "Known deferred work" section first — some failures are
+Check `docs/ARCHITECTURE.md`'s "Known gaps and deferred work" section first — some failures are
 already known and scoped. A report matching an already-documented gap isn't new
 information; a *different* exception, a new affected-file pattern, or a big jump in
 failure count is.

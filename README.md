@@ -28,6 +28,9 @@ original code that reads a format; you provide your own copy of the game.
 - Dumping your own copy is subject to your own country's software-copying and
   DRM-circumvention laws, which vary by jurisdiction. Proceeding is entirely your own
   discretion; this project and its contributors are not responsible for your actions.
+- Some engine behaviour is implemented from written specifications produced by studying
+  a contributor's own copy of the game outside this repository (a clean-room split; see
+  `docs/ARCHITECTURE.md`). No game code, disassembly, or decryption keys appear here.
 - This is an independent reverse-engineering effort undertaken for preservation and
   educational purposes, provided with no warranty of any kind.
 
@@ -39,20 +42,23 @@ original code that reads a format; you provide your own copy of the game.
 - Texture resolution across every asset category (`chr`, `map`, `obj`, `parts`), including
   cross-category reuse, per-map-area texture atlases, and corrupt/missing-source-data
   handling
-- Real materials, not placeholders: alpha modes (cutout / soft blend / additive) driven by
-  FromSoft's own MTD naming, chr/parts specular roughness from real per-material data,
-  terrain ground-blending, reflective/refractive water, and lightmapped surfaces using the
-  real DeS shading formula (hemisphere ambient + a lightmap-scaled environment term),
-  confirmed against decompiled DeS shader bytecode, not guessed
-- **MSB level-layout parsing**: map pieces and placed objects/props load at their real
-  positions with real per-instance lighting (each placement resolves its own `LightID` into
-  real `LIGHT_BANK` ambient/environment data), not a shared global guess
+- Materials routed by each MTD's own data (blend mode, lighting model, shader family):
+  terrain ground-blending, water, sky domes, and lit surfaces using the game's own shading
+  (hemisphere ambient, environment cubemaps or directional lights, lightmaps), reconstructed
+  from the shipped shader programs and RPCS3 frame captures
+- The game's output and post-processing: per-material fog and atmospheric scattering with
+  the engine's own constants, eye adaptation, bloom and tone correction, a sun shadow, and
+  map point lights on props
+- **MSB level-layout parsing**: map pieces and objects at their real positions, each with its
+  own light, fog and scattering rows
+- A bounded, opt-in preview of map visual effects (fog, fire, candles, dust) from the game's
+  own effect files
 - An in-editor and headless **asset mounting** system: point it at your own raw PS3 game
   directory and it unpacks the game's BND/DCX containers directly, in-process, from the
   Archstone editor toolbar — no external unpacking tool needed
 - A manual, on-demand **load workflow** ("Load Model(s)...", "Load Folder...", "Load
   Map...") instead of Godot's own reimport pipeline — a deliberate architectural choice,
-  see `docs/ARCHITECTURE.md`'s "Standing priority" section for why
+  see `docs/ARCHITECTURE.md`'s "Code layout" section for why
 
 See `docs/ARCHITECTURE.md` for the full architecture writeup, `docs/PLAN.md` for the
 roadmap, and `docs/context.md` for the development history behind the trickier decisions.
@@ -60,9 +66,8 @@ roadmap, and `docs/context.md` for the development history behind the trickier d
 ## Not yet implemented
 
 Skeletal animation, physics/collision, navmesh, and gameplay systems don't exist yet — this
-is still an asset importer, not a game. These are real, scoped gaps tracked in
-`docs/PLAN.md`'s roadmap and `docs/ARCHITECTURE.md`'s "Known deferred work" section, not
-just unlisted TODOs.
+is still an asset importer, not a game. These are scoped gaps tracked in `docs/PLAN.md` and
+`docs/ARCHITECTURE.md`'s "Known gaps and deferred work" section.
 
 ## Contributing
 
@@ -91,7 +96,7 @@ Want to help? See `CONTRIBUTING.md` for the contributor workflow.
    own raw game directory, then **Import** (full import, or choose categories).
 4. Still in the Archstone toolbar: **Load Map...** to place a real level with lighting, or
    **Load Model(s).../Load Folder...** for individual assets. Nothing loads automatically —
-   see `docs/ARCHITECTURE.md`'s "Architecture" section for why.
+   see `docs/ARCHITECTURE.md`'s "Code layout" section for why.
 
 ## License
 
