@@ -5,28 +5,17 @@ using SoulsFormats;
 
 namespace Archstone;
 
-// The five DrawParam IDs are copied verbatim from MSBD.Part. FogID selects a FOG_BANK row - NOT
-// RSX fixed-function fog (which DeS never uses, docs/context.md part 36), but the bank's colour /
-// distance / degRotW, which drive output_stage.gdshaderinc's des_fog hand-rolled distance fade
-// (docs/context.md part 45). Resolved in FlverLoader.ApplyDrawParams -> ApplyFogBank.
+// A MapPiece or Object with its draw-parameter IDs as stored in MSBD.Part. ToneMapID and
+// ToneCorrectID are carried but not bound per placement (those banks are frame-global).
 public readonly record struct MsbPlacement(string ModelPath, string Name,
 	Vector3 Position, Vector3 RotationDegrees, Vector3 Scale, byte LightID, byte FogID,
 	byte ToneMapID, byte ToneCorrectID, byte ScatterID, int EntityID = -1);
 
-// A real MSBD.Events.Light: torch/campfire/candle etc, anchored to an already-placed MapPiece/
-// Object part rather than a floating region. PointLightID resolves against POINT_LIGHT_BANK via
-// DrawParamReader.GetPointLightBankRow (mod 64, not a direct index - see docs/context.md part 52).
-// Name is the light event's own (Japanese) label, kept for diagnostics only.
-//
-// Position resolution differs by anchor type - see docs/ARCHITECTURE.md's POINT_LIGHT_BANK entry
-// for why (MapPiece MSB transforms are always identity) and its known approximation error (no
-// FLVER Dummy attach points to disambiguate multiple lights on one piece). A MapPiece anchor
-// carries its .flver path instead of a position; FlverLoader resolves the smallest sub-mesh's AABB
-// centre once it's loaded that model anyway. An Object anchor's own position is used directly.
-public readonly record struct PointLightPlacement(Vector3 Position, string? FlverPath, int PointLightID, string Name);
+// A light event: its region's position in Godot space and its POINT_LIGHT_BANK row. Name is for
+// diagnostics.
+public readonly record struct PointLightPlacement(Vector3 Position, int BankRow, string Name);
 
-// Reads a .msb's map-piece placements and resolves each one to a .flver path on disk.
-// No scene-node concerns - see docs/ARCHITECTURE.md's FlverModelBuilder/FlverLoader split, mirrored here.
+// MSB parsing: placements, events and regions, resolved to paths on disk. No scene nodes.
 public partial class MsbLoader : RefCounted
 {
 	public List<MsbPlacement> ReadMapPieces(string msbPath)
@@ -34,7 +23,7 @@ public partial class MsbLoader : RefCounted
 		string realMsbPath = ProjectSettings.GlobalizePath(msbPath);
 		var msb = MSBD.Read(realMsbPath);
 
-		// mapstudio/{name}.msb has its models directly in a sibling map/{name}/ folder.
+		// mapstudio/{name}.msb's models are in the sibling map/{name}/ folder.
 		string blockName = System.IO.Path.GetFileNameWithoutExtension(realMsbPath);
 		string blockDir = System.IO.Path.Combine(
 			System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(realMsbPath))!, blockName);
@@ -57,12 +46,7 @@ public partial class MsbLoader : RefCounted
 		});
 	}
 
-	// MSBD.Parts.Objects - props/decorations/interactible scenery, distinct from MapPieces.
-	// Resolves against the mounted obj/ corpus (a model-ID-per-folder scheme) instead of a map
-	// block folder - a real, deterministic 1:1 convention (obj/{id}/sib/{id}.flver, confirmed
-	// across all 777 real mounted obj/ folders, no exceptions), not the multi-rule CandidateDirs
-	// chain FlverModelBuilder needs for *textures* - that's unrelated and already handled
-	// downstream once FlverLoader.Instantiate() parses the resolved .flver.
+	// MSBD.Parts.Objects, resolved to obj/{id}/sib/{id}.flver (true for all 777 obj folders).
 	public List<MsbPlacement> ReadObjects(string msbPath)
 	{
 		string realMsbPath = ProjectSettings.GlobalizePath(msbPath);
@@ -82,61 +66,62 @@ public partial class MsbLoader : RefCounted
 		});
 	}
 
-	// MSBD.Events.Lights - each anchored to an already-placed Part by name (PartName), not a
-	// region (RegionName is always empty on these - confirmed real, not a parsing gap). Both
-	// MapPieces and Objects are searched, since every real light anchor found in m02 is a MapPiece
-	// but there's no reason a brazier-style Object couldn't carry one on another map. A PartName
-	// that resolves to neither is skipped - the anchor might be a Collision/Navmesh/other Part type
-	// this project doesn't place at all. See PointLightPlacement's own doc comment for why MapPiece
-	// and Object anchors resolve their position completely differently.
+	// The (ToneMapID, ToneCorrectID) pair most of the block's collisions carry; (0, 0) without any.
+	public (byte ToneMapId, byte ToneCorrectId) ReadDominantCollisionToneIds(string msbPath)
+	{
+		var msb = MSBD.Read(ProjectSettings.GlobalizePath(msbPath));
+		return msb.Parts.Collisions
+			.GroupBy(part => (part.ToneMapID, part.ToneCorrectID))
+			.OrderByDescending(group => group.Count())
+			.Select(group => group.Key)
+			.FirstOrDefault();
+	}
+
+	// MSBD.Events.Lights. PointLightID is the region index (as SFX's UnkT00) and UnkT04 the
+	// POINT_LIGHT_BANK row (-1: no light); captures confirm both (docs/context.md, "Point-light
+	// positions and rows"). PartName carries no position.
 	public List<PointLightPlacement> ReadPointLights(string msbPath)
 	{
-		string realMsbPath = ProjectSettings.GlobalizePath(msbPath);
-		var msb = MSBD.Read(realMsbPath);
-		string blockName = System.IO.Path.GetFileNameWithoutExtension(realMsbPath);
-		string blockDir = System.IO.Path.Combine(
-			System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(realMsbPath))!, blockName);
-
-		// Case-insensitive on purpose, matching ReadMapPieces: MSBD.Part.ModelName ("m3401B0") and
-		// the actual extracted filename ("m3401b0.flver") disagree in case often enough that a
-		// direct Path.Combine + File.Exists silently fails on a case-sensitive filesystem.
-		var flverByName = new Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
-		if (System.IO.Directory.Exists(blockDir))
-			foreach (var path in System.IO.Directory.GetFiles(blockDir, "*.flver"))
-				flverByName.TryAdd(System.IO.Path.GetFileNameWithoutExtension(path), path);
-
-		var mapPieceFlverPath = new Dictionary<string, string>();
-		foreach (var p in msb.Parts.MapPieces)
-			if (flverByName.TryGetValue(p.ModelName, out var flverPath))
-				mapPieceFlverPath[p.Name] = flverPath;
-		var objectPosition = new Dictionary<string, Vector3>();
-		foreach (var p in msb.Parts.Objects)
-			objectPosition.TryAdd(p.Name, new Vector3(p.Position.X, p.Position.Y, p.Position.Z));
-
+		var msb = MSBD.Read(ProjectSettings.GlobalizePath(msbPath));
 		var lights = new List<PointLightPlacement>();
 		foreach (var light in msb.Events.Lights)
 		{
-			if (light.PartName == null) continue;
-			if (mapPieceFlverPath.TryGetValue(light.PartName, out var flverPath))
-				lights.Add(new PointLightPlacement(default, ProjectSettings.LocalizePath(flverPath), light.PointLightID, light.Name));
-			else if (objectPosition.TryGetValue(light.PartName, out var pos))
-				lights.Add(new PointLightPlacement(pos, null, light.PointLightID, light.Name));
+			var (region, _, _) = EventRegion(msb, light, light.PointLightID);
+			if (region == null || light.UnkT04 < 0) continue;
+			lights.Add(new PointLightPlacement(
+				new Vector3(-region.Position.X, region.Position.Y, region.Position.Z), light.UnkT04, light.Name));
 		}
 		return lights;
 	}
 
-	// SFX's type-specific UnkT00 is an index into POINT_PARAM_ST, separate from the
-	// common Event.RegionName. Corpus: 1622 valid indices / 1693 events; the remaining
-	// 71 are -1. 1376 region names match exactly, including 274/278 Nexus events.
-	// PartName is NOT an emitter position. Using its mesh centre collapsed 180 Nexus
-	// candle events onto one point. Keep unresolved events out of the render path.
+	// A map SFX event at its region (external ELF_ENGINE_ACCURACY_RESEARCH.md 9.4). 1,691 of 1,693
+	// events resolve; unresolved ones are skipped (a part's mesh centre is not an emitter position).
+	// RotationDegrees are already mirrored (alpha, -beta, -gamma); build with EulerOrder.Yzx.
 	public readonly record struct SfxPlacement(Vector3 Position, Vector3 RotationDegrees,
 		int EffectId, string Name, string RegionName, int RegionIndex, int EntityID = -1);
 
-	internal static MSBD.Region SfxRegion(MSBD msb, MSBD.Event.SFX sfx)
+	// SoulsFormats exposes the common region index only as a resolved name (null when out of range);
+	// the raw index is read so an invalid one is reported instead of replaced by the type index.
+	private static readonly System.Reflection.FieldInfo CommonRegionIndex =
+		typeof(MSBD.Event).GetField("RegionIndex", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+		?? throw new System.MissingFieldException(nameof(MSBD.Event), "RegionIndex");
+
+	internal readonly record struct SfxRegionSelection(MSBD.Region Region, int Index, string Status);
+
+	internal static SfxRegionSelection SfxRegion(MSBD msb, MSBD.Event.SFX sfx) => EventRegion(msb, sfx, sfx.UnkT00);
+
+	// The common region index when nonnegative, else the type's own (SFX UnkT00, Light PointLightID).
+	private static SfxRegionSelection EventRegion(MSBD msb, MSBD.Event e, int typeIndex)
 	{
 		var regions = msb.Regions.Regions;
-		return sfx.UnkT00 >= 0 && sfx.UnkT00 < regions.Count ? regions[sfx.UnkT00] : null;
+		int common = (int)CommonRegionIndex.GetValue(e);
+		if (common >= 0)
+			return common < regions.Count
+				? new(regions[common], common, "Resolved common region index")
+				: new(null, common, "Invalid common region index");
+		return typeIndex >= 0 && typeIndex < regions.Count
+			? new(regions[typeIndex], typeIndex, "Resolved type region index")
+			: new(null, typeIndex, "Unresolved type region index");
 	}
 
 	public List<SfxPlacement> ReadSfxPlacements(string msbPath)
@@ -145,18 +130,17 @@ public partial class MsbLoader : RefCounted
 		var placements = new List<SfxPlacement>();
 		foreach (var sfx in msb.Events.SFX)
 		{
-			var region = SfxRegion(msb, sfx);
+			var (region, index, _) = SfxRegion(msb, sfx);
 			if (region == null) continue;
 			placements.Add(new SfxPlacement(
 				new Vector3(-region.Position.X, region.Position.Y, region.Position.Z),
 				new Vector3(region.Rotation.X, -region.Rotation.Y, -region.Rotation.Z),
-				sfx.EffectID, sfx.Name, region.Name, sfx.UnkT00, sfx.EntityID));
+				sfx.EffectID, sfx.Name, region.Name, index, sfx.EntityID));
 		}
 		return placements;
 	}
 
-	// MSB boxes have their origin at the bottom centre, unlike particle emitter boxes.
-	// Rotation/handedness follow the same placement convention as other MSB entities.
+	// An MSB box region (origin at the bottom centre). Mirrored angles, composed Y-Z-X.
 	public readonly record struct RegionBox(int EntityID, string Name, Transform3D Transform, Vector3 Size)
 	{
 		public bool Contains(Vector3 mapPosition)
@@ -183,7 +167,7 @@ public partial class MsbLoader : RefCounted
 			if (!size.IsFinite() || !position.IsFinite() || !rotation.IsFinite() ||
 				size.X <= 0 || size.Y <= 0 || size.Z <= 0) continue;
 			boxes.Add(new RegionBox(region.EntityID, region.Name,
-				new Transform3D(Basis.FromEuler(rotation * (Mathf.Pi / 180)), position), size));
+				new Transform3D(Basis.FromEuler(rotation * (Mathf.Pi / 180), EulerOrder.Yzx), position), size));
 		}
 		return boxes;
 	}
@@ -197,7 +181,7 @@ public partial class MsbLoader : RefCounted
 			string flverPath = resolveFlverPath(part.ModelName);
 			if (flverPath == null) continue;
 
-			// part.Position/Rotation/Scale are System.Numerics.Vector3 (SoulsFormats), not Godot's.
+			// System.Numerics vectors from SoulsFormats; mirroring happens in FlverLoader.
 			placements.Add(new MsbPlacement(
 				ProjectSettings.LocalizePath(flverPath),
 				part.Name,

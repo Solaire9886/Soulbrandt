@@ -7,11 +7,8 @@ using SoulsFormats;
 
 namespace Archstone;
 
-// Read-only access to mounted/sfx/<bank>/ - loose files AssetExtractor already unpacked from
-// the user's plain FFXBND archives (see AssetExtractor.KnownCategories/FallbackEntryOutputPath;
-// each bank keeps its own folder so identically-named entries in different banks, e.g. both
-// main and commoneffects ship a real, different f0000512.ffx, never collide on disk). No
-// archive reading, executable scripts, process-global cache, or edits to SoulsFormats here.
+// Reads effects from mounted/sfx/<bank>/ (one folder per .ffxbnd, since banks reuse entry names)
+// through the fork's DeS FFXDLSE mode, and resolves MSB SFX events.
 public partial class SfxLoader : RefCounted
 {
     private const int MaxEntryBytes = 8 * 1024 * 1024;
@@ -30,8 +27,7 @@ public partial class SfxLoader : RefCounted
         {
             string dir = ProjectSettings.GlobalizePath(bankDir);
             if (!Directory.Exists(dir)) throw new DirectoryNotFoundException($"Not a mounted SFX bank folder: {dir}");
-            // Effect IDs aren't all 7 digits (e.g. f100000028.ffx) - match by prefix/suffix only,
-            // not a fixed length, the same way the original bank-entry scan did.
+            // IDs are not all seven digits (f100000028.ffx); match by prefix and suffix.
             return Directory.GetFiles(dir, "*.ffx")
                 .Select(p => Path.GetFileNameWithoutExtension(p))
                 .Where(n => n.Length > 1 && n[0] is 'f' or 'F')
@@ -89,6 +85,7 @@ public partial class SfxLoader : RefCounted
             2023 => "68BDDF1D5B462DE5BAEB280D0E36AE8801B569DA2B3B2BC940730209CE8FF532",
             2121 => "508BF8A2EF50EDB0D8C88C419714129FEDAE5E365F00EB97AE2A6F2E9D0DC07C",
             2123 => "4CB5E76551BED84D611E8C2F8787D03801FD86AB0B8847FD5F3516A5DE7EDCBA",
+            2020 => "75AC6D3194329A73B1E00E80F376FDF22E6A27927870919ACB14481BB8238D0C",
             _ => ""
         };
         if (expected == "") return false;
@@ -158,14 +155,14 @@ public partial class SfxLoader : RefCounted
             var map = MSBD.Read(ProjectSettings.GlobalizePath(msbPath));
             foreach (var e in map.Events.SFX)
             {
-                var region = MsbLoader.SfxRegion(map, e);
+                var (region, index, status) = MsbLoader.SfxRegion(map, e);
                 result.Add(new Godot.Collections.Dictionary {
                     ["name"] = e.Name, ["entity_id"] = e.EntityID, ["effect_id"] = e.EffectID, ["part"] = e.PartName ?? "",
                     ["region"] = e.RegionName ?? "", ["unknown_t00"] = e.UnkT00,
-                    ["placement_region"] = region?.Name ?? "",
+                    ["placement_region"] = region?.Name ?? "", ["placement_region_index"] = index,
                     ["position"] = region == null ? default(Vector3) : new Vector3(-region.Position.X, region.Position.Y, region.Position.Z),
                     ["rotation_degrees"] = region == null ? default(Vector3) : new Vector3(region.Rotation.X, -region.Rotation.Y, -region.Rotation.Z),
-                    ["placement_status"] = region == null ? "Unresolved SFX region index" : "Resolved SFX region index" });
+                    ["placement_status"] = status });
             }
         }
         catch (Exception e) { LastError = e.Message; }

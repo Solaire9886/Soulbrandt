@@ -26,3 +26,26 @@ enabled=PackedStringArray("res://addons/archstone/plugin.cfg")
 
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
+
+[shader_globals]
+
+des_exposure_map={
+"type": "sampler2D",
+"value": ""
+}
+des_tone_brightness={
+"type": "vec3",
+"value": Vector3(1, 1, 1)
+}
+des_tone_contrast={
+"type": "vec3",
+"value": Vector3(1, 1, 1)
+}
+des_tone_saturation={
+"type": "float",
+"value": 1.0
+}
+des_tone_hue_radians={
+"type": "float",
+"value": 0.0
+}
