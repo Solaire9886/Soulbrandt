@@ -2,6 +2,7 @@
 extends EditorPlugin
 
 const MOUNT_CONFIG_PATH := "user://archstone_mount.cfg"
+const OVERLAY_METADATA := "archstone_debug_overlay"
 
 var import_button
 
@@ -21,6 +22,9 @@ var _sfx_loader
 var _sfx_bank_dialog: EditorFileDialog
 var _sfx_options_dialog: ConfirmationDialog
 var _sfx_preview: Node3D
+var _overlay
+var _overlay_dialog: AcceptDialog
+var _overlay_viewport := 0
 
 
 func _enable_plugin() -> void:
@@ -37,10 +41,18 @@ func _enter_tree() -> void:
 	add_control_to_container(EditorPlugin.CONTAINER_TOOLBAR, import_button)
 	import_button.get_node("MenuButton").get_popup().id_pressed.connect(_on_menu_item_pressed)
 
-	# No EditorSceneFormatImporter for .flver anymore - see docs/ARCHITECTURE.md's Architecture section.
+	# .flver is loaded manually, never through an import plugin (docs/ARCHITECTURE.md, "Code layout").
 	# One FlverLoader instance for the whole editor session so its cache persists across loads.
 	_loader = load("res://addons/archstone/scripts/FlverLoader.cs").new()
 	_sfx_loader = load("res://addons/archstone/scripts/SfxLoader.cs").new()
+
+	# Debug overlay: one instance outside the tree, drawn over the chosen editor viewport.
+	_overlay = preload("res://addons/archstone/scripts/DebugOverlay.gd").new()
+	var settings := EditorInterface.get_editor_settings()
+	for section in _overlay.SECTIONS:
+		_overlay.enabled[section] = settings.get_project_metadata(OVERLAY_METADATA, section, false)
+	_overlay_viewport = settings.get_project_metadata(OVERLAY_METADATA, "viewport", 0)
+	set_force_draw_over_forwarding_enabled()
 
 
 func _exit_tree() -> void:
@@ -48,7 +60,11 @@ func _exit_tree() -> void:
 	remove_control_from_container(EditorPlugin.CONTAINER_TOOLBAR, import_button)
 
 	import_button.free()
-	for dialog in [_mount_dialog, _import_scope_dialog, _category_dialog, _clear_confirm_dialog, _progress_dialog, _message_dialog, _load_files_dialog, _load_folder_dialog, _load_map_dialog, _sfx_bank_dialog, _sfx_options_dialog]:
+	if _overlay:
+		_overlay.release()
+		_overlay.free()
+		_overlay = null
+	for dialog in [_mount_dialog, _import_scope_dialog, _category_dialog, _clear_confirm_dialog, _progress_dialog, _message_dialog, _load_files_dialog, _load_folder_dialog, _load_map_dialog, _sfx_bank_dialog, _sfx_options_dialog, _overlay_dialog]:
 		if is_instance_valid(dialog):
 			dialog.queue_free()
 
@@ -71,13 +87,72 @@ func _on_menu_item_pressed(id: int) -> void:
 		_show_load_map_dialog()
 	elif id == 7:
 		_show_sfx_bank_dialog()
+	elif id == 8:
+		_show_overlay_dialog()
+
+
+func _process(delta: float) -> void:
+	if _overlay == null:
+		return
+	var active: bool = _overlay.any_enabled()
+	if active:
+		var viewport := EditorInterface.get_editor_viewport_3d(_overlay_viewport)
+		_overlay.redraws_on_demand = not EditorInterface.get_editor_settings().get_setting("interface/editor/update_continuously")
+		_overlay.tick(delta, viewport.get_camera_3d(), EditorInterface.get_edited_scene_root(), viewport)
+		update_overlays()
+
+
+func _forward_3d_force_draw_over_viewport(surface: Control) -> void:
+	# Each editor viewport's overlay surface is a sibling of its SubViewport's container.
+	if _overlay and _overlay.any_enabled() and surface.get_parent().is_ancestor_of(EditorInterface.get_editor_viewport_3d(_overlay_viewport)):
+		_overlay.draw_on(surface)
+
+
+# Non-modal, so the viewport stays usable while sections are toggled. Settings persist
+# per project in editor metadata.
+func _show_overlay_dialog() -> void:
+	if is_instance_valid(_overlay_dialog):
+		_overlay_dialog.popup_centered()
+		return
+	_overlay_dialog = AcceptDialog.new()
+	_overlay_dialog.title = "Debug Overlay"
+	_overlay_dialog.exclusive = false
+	_overlay_dialog.ok_button_text = "Close"
+	var box := VBoxContainer.new()
+	var settings := EditorInterface.get_editor_settings()
+	for section in _overlay.SECTIONS:
+		var check := CheckBox.new()
+		check.text = _overlay.TITLES[section]
+		check.button_pressed = _overlay.enabled[section]
+		check.toggled.connect(func(on: bool):
+			_overlay.enabled[section] = on
+			settings.set_project_metadata(OVERLAY_METADATA, section, on)
+			if not _overlay.any_enabled():
+				_overlay.release()
+			update_overlays())
+		box.add_child(check)
+	var row := HBoxContainer.new()
+	var label := Label.new()
+	label.text = "Viewport"
+	row.add_child(label)
+	var viewport := OptionButton.new()
+	for i in 4:
+		viewport.add_item("%d" % (i + 1), i)
+	viewport.selected = _overlay_viewport
+	viewport.item_selected.connect(func(index: int):
+		_overlay_viewport = index
+		settings.set_project_metadata(OVERLAY_METADATA, "viewport", index)
+		update_overlays())
+	row.add_child(viewport)
+	box.add_child(row)
+	_overlay_dialog.add_child(box)
+	EditorInterface.get_base_control().add_child(_overlay_dialog)
+	_overlay_dialog.popup_centered()
 
 
 # UI glue only. Parsing, layer association, particles and state stay in C#.
-# Rooted at res://mounted/sfx (via "Import", same as every other Load dialog) - not the raw
-# game folder. AssetExtractor unpacks each .ffxbnd into its own bank-named subfolder there
-# (mounted/sfx/ds_sfxbnd_m01/, mounted/sfx/ds_sfxbnd_commoneffects/, ...), so picking one of
-# those subfolders is the mounted equivalent of picking a plain .ffxbnd used to be.
+# Rooted at res://mounted/sfx, where each .ffxbnd is unpacked into its own bank folder
+# (ds_sfxbnd_m01/, ds_sfxbnd_commoneffects/, ...); pick one of those.
 func _show_sfx_bank_dialog() -> void:
 	if not _pick_load_target():
 		_show_message("No scene open", "Open a 3D scene before previewing SFX layers.")
