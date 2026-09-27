@@ -8,23 +8,13 @@ using SoulsFormats;
 
 namespace Archstone;
 
-// Walks a raw Demon's Souls extraction root and unpacks its .bnd/.dcx containers directly via
-// SoulsFormatsNEXT, writing loose files into res://mounted's layout. No editor-only API - called
-// identically from archstone.gd and the headless extract_cli.gd script.
+// Unpacks the .bnd/.dcx containers of a raw game root into loose files under res://mounted. No
+// editor API: used by archstone.gd and the headless extract_cli.gd alike.
 public partial class AssetExtractor : RefCounted
 {
-	// The only categories the importer actually reads - see docs/ARCHITECTURE.md.
-	// ponytail: flat allowlist, extend when animation/collision import needs a new category.
-	// param/paramdef added for LIGHT_BANK/FOG_BANK (see DrawParamReader.cs) - "param" also pulls
-	// the much larger unrelated gameparam/ folder (item/npc data, unused today) since extraction
-	// is whole-top-level-folder granularity; ~8MB total, not worth a sub-folder filter for that.
-	// "shader" added 2026-08-28 for the material shader library - see ShaderLibrary.cs and
-	// docs/ARCHITECTURE.md's "The shader library" section. Its entry names don't carry the
-	// data/DVDROOT prefix every other container uses, which ResolveEntryOutputPath handles.
-	// "sfx" added 2026-09-06 for particle-effect definitions - see SfxLoader.cs and
-	// docs/ARCHITECTURE.md's SFX entry. Its entry names carry "Sfx" itself (not a generic
-	// DVDROOT placeholder) right after "data", so it needs the same container-qualified
-	// fallback path shader's entries do - see ResolveEntryOutputPath.
+	// The top-level folders the loaders read. "param" also brings gameparam/ (~8 MB, unused yet).
+	// "shader" and "sfx" entries need FallbackEntryOutputPath (see ResolveEntryOutputPath).
+	// ponytail: flat allowlist; extend when a new category is needed.
 	public static readonly string[] KnownCategories = { "chr", "map", "obj", "parts", "mtd", "param", "paramdef", "shader", "sfx" };
 
 	// Instance wrapper so GDScript can read this without a second copy in archstone.gd.
@@ -88,8 +78,7 @@ public partial class AssetExtractor : RefCounted
 		}
 		else if (BND4.IsRead(inner, out var bnd4))
 		{
-			// Not yet confirmed against a real DeS container (only BND3 observed so far) -
-			// included since SoulsFormatsNEXT already ships it at zero extra cost.
+			// No DeS BND4 has been seen; supported because SoulsFormatsNEXT reads it anyway.
 			foreach (var entry in bnd4.Files)
 				WriteEntry(entry.Name, entry.Bytes, sourcePath, rawRoot, outputRoot, ref extracted, ref skipped);
 		}
@@ -116,15 +105,9 @@ public partial class AssetExtractor : RefCounted
 		WriteIfStale(sourcePath, Path.Combine(outputRoot, relative), bytes, ref extracted, ref skipped);
 	}
 
-	// For containers whose entry names aren't data/DVDROOT paths - shader/*.shaderbnd names its
-	// entries by their original build path (N:\DemonsSoul\Source\Shader\DS_Flver\Debug\...),
-	// which carries no on-disk location at all. Mirrors the container's own place in the raw tree
-	// and gives it a folder named after itself, so the 1349 ds_flver entries land in
-	// shader/ds_flver/ and can't collide with ds_filter's identically-shaped names.
-	//
-	// Before this existed, ResolveEntryOutputPath returning null meant such entries were dropped
-	// silently - the reason adding "shader" to KnownCategories alone would have looked like it
-	// worked and produced nothing.
+	// For entries without a data/DVDROOT path (shaderbnd entries are build paths; sfx paths collide
+	// between banks): the container's own location plus a folder named after it, e.g.
+	// shader/ds_flver/. Without this such entries were silently dropped.
 	private static string FallbackEntryOutputPath(string entryName, string sourcePath, string rawRoot)
 	{
 		string fileName = Path.GetFileName(entryName.Replace('\\', '/'));
@@ -150,20 +133,16 @@ public partial class AssetExtractor : RefCounted
 		extracted++;
 	}
 
-	// Real BND entry names are full Windows paths (e.g. "N:\...\data\DVDROOT\chr\c2000\c2000.flver")
-	// - dropping the segment right after "data" (always "DVDROOT") and joining the rest lands
-	// every entry at its exact existing on-disk path.
-	// Returns null when the entry name has no data/DVDROOT prefix - see FallbackEntryOutputPath.
+	// Entry names are Windows paths ("N:\...\data\DVDROOT\chr\c2000\c2000.flver"); dropping the
+	// segment after "data" gives the on-disk path. Null without that prefix (see
+	// FallbackEntryOutputPath).
 	private static string ResolveEntryOutputPath(string entryName)
 	{
 		var segs = entryName.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
 		int dataIdx = Array.FindIndex(segs, s => s.Equals("data", StringComparison.OrdinalIgnoreCase));
 		if (dataIdx < 0 || dataIdx + 2 > segs.Length) return null;
-		// sfx/*.ffxbnd entries are "data/Sfx/OutputData/.../fNNNNNNN.ffx" - "Sfx" here is the real
-		// category, not a generic DVDROOT placeholder, and every bank shares the same internal tree
-		// (.../Effect/f0000512.ffx exists in both main and commoneffects, as a genuinely different
-		// effect - docs/context.md part 57/58) - resolving by this path alone would silently
-		// collide entries from different banks. Bail to the container-qualified fallback instead.
+		// .ffxbnd entries ("data/Sfx/OutputData/.../fNNNNNNN.ffx") share one internal tree across banks
+		// (f0000512.ffx differs between main and commoneffects), so they use the fallback path.
 		if (segs[dataIdx + 1].Equals("Sfx", StringComparison.OrdinalIgnoreCase)) return null;
 		return string.Join('/', segs[(dataIdx + 2)..]);
 	}

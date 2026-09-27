@@ -1,8 +1,7 @@
 extends SceneTree
 
-# Headless entry point into AssetExtractor.cs, for CLI-driven extraction without an editor
-# GUI session - same underlying code path archstone.gd's "Mount..." dialog calls into.
-# Usage: godot-mono --headless --path . -s addons/archstone/extract_cli.gd -- \
+# Headless extraction through AssetExtractor, the same code the editor's "Import" action runs.
+# Usage: godot-mono --headless --path . -s addons/archstone/scripts/extract_cli.gd -- \
 #            --raw-root=/path/to/raw/game/root [--categories=chr,map,...]
 
 func _init():

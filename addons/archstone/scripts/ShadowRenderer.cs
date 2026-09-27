@@ -2,28 +2,16 @@ using Godot;
 
 namespace Archstone;
 
-// Sun-shadow for a loaded map, driven by the map's SHADOW_BANK row (docs/context.md parts 39/49).
-// DeS uses 4-split PERSPECTIVE shadow maps (the ShadowBank "PSM" fields calibulateFar /
-// persedDepthOffset / radFactor; the captured cast matrices are perspective and re-warp around the
-// camera each frame).
-//
-// This is v2, deliberately simpler: ONE STATIC orthographic depth pass covering the lit casters'
-// bounds. The shadow projection is fixed in the world - a fixed sun + fixed geometry cast a fixed
-// shadow - and does NOT follow the editor camera. The only camera-dynamic part is the shader-side
-// distance fade in sun_shadow() (SHADOW_BANK fadeBeginDist/fadeDist vs view_distance), which is how
-// DeS makes "how near the camera shadows are drawn" dynamic without touching the cast itself. The
-// 4-split camera-relative atlas + the real PSM warp are layered on this foundation later
-// (docs/PLAN.md's shadow item).
-//
-// Compatibility has no shadow-only light and no shadow term outside light() (DeS composes
-// min(shadow, lightmap) in fragment()), so this is a hand-rolled SubViewport depth pass, not
-// Godot's own shadow system (spike: docs/context.md part 37). Receivers gate their env/directional
-// term by min(shadowTerm, lightmap) in hemisphere_ambient.gdshaderinc.
+// A map's sun shadow from its SHADOW_BANK row. The game uses four perspective splits that follow
+// the camera; this stand-in is one static orthographic depth pass over the lit casters, so the
+// cast never moves and only the shader's distance fade depends on the camera (a camera-following
+// projection made shadows slide). A hand-built SubViewport pass, because Godot's shadow term is
+// only reachable in light(), after fragment() where the engine applies min(shadow, lightmap).
+// See docs/ARCHITECTURE.md, "Sun shadows".
 [Tool]
 public partial class ShadowRenderer : Node
 {
-	// 2048 = DeS's full shadow surface (it splits this into a 2x2 grid of 1024^2 cascade tiles; we
-	// use it as one map, since v2 is a single static region, not the 4-split - see docs/PLAN.md).
+	// The game's full shadow surface (2x2 tiles of 1024), used here as one map.
 	private const int AtlasSize = 2048;
 	private const float Near = 0.05f;
 	private const float RadiusCap = 200.0f; // 2048^2 has the headroom; ~0.2 m/texel worst case
@@ -34,8 +22,7 @@ public partial class ShadowRenderer : Node
 	private SubViewport _viewport;
 	private Camera3D _camera;
 
-	// beginDist/endDist are accepted (they're SHADOW_BANK fields and the 4-split will need them as
-	// cascade split ranges) but unused by the static v2 region, which sizes itself from the casters.
+	// beginDist/endDist (the game's split range) are accepted but unused by the static region.
 	public bool Setup(Godot.Collections.Array<MeshInstance3D> casters, Vector3 lightTowardDirection,
 		float beginDist, float endDist, float fadeBegin, float fadeDist, float density, Color tint,
 		float depthOffset, float volumeDepth)
@@ -48,10 +35,8 @@ public partial class ShadowRenderer : Node
 		if (!MergedCasterBounds(casters, out Aabb bounds))
 			return false;
 
-		// Static ortho region from the casters' own world bounds, capped so one pathological MSB
-		// (m01_00_00_00 spans the Nexus hub AND the Old One area far below) can't blow the 2048^2
-		// atlas texel size out. Geometry past the cap goes unshadowed until the 4-split
-		// camera-relative atlas exists - a deliberate v2 limit, not a bug.
+		// The casters' world bounds, capped (m01_00_00_00 spans the Nexus and the Old One area far below);
+		// geometry past the cap is unshadowed.
 		Vector3 center = bounds.GetCenter();
 		float radius = Mathf.Min(0.5f * bounds.Size.Length() + 2.0f, RadiusCap);
 		float volume = Mathf.Clamp(volumeDepth, 1.0f, 60.0f);
@@ -72,8 +57,7 @@ public partial class ShadowRenderer : Node
 		{
 			Name = "ShadowViewport",
 			Size = new Vector2I(AtlasSize, AtlasSize),
-			// Content is static; ALWAYS just guarantees the texture stays populated in the editor
-			// (an own_world_3d SubViewport with ONCE can come up blank until something forces a redraw).
+			// ALWAYS: with ONCE an own-world SubViewport can come up blank in the editor.
 			RenderTargetUpdateMode = SubViewport.UpdateMode.Always,
 			RenderTargetClearMode = SubViewport.ClearMode.Always,
 			TransparentBg = true, // empty texels read 0.0, which sun_shadow() treats as "no occluder"
@@ -110,10 +94,8 @@ public partial class ShadowRenderer : Node
 		return true;
 	}
 
-	// All shadow uniforms, pushed once - the projection never changes, so there is nothing to update
-	// per frame. A placement whose LightID resolved already has a per-instance override material
-	// (FlverLoader's ApplyDrawParams); one that didn't shares the cached base material, so duplicate
-	// it to an override first - same pattern ApplyDrawParams uses.
+	// Pushes every shadow uniform once (the projection never changes), duplicating a shared base
+	// material into a per-placement override where ApplyDrawParams made none.
 	private void BindReceivers(Godot.Collections.Array<MeshInstance3D> casters, Projection clip,
 		Projection view, float lightFar, float shadowBias, float density, Color tint,
 		float fadeBegin, float fadeRange)
@@ -167,8 +149,7 @@ public partial class ShadowRenderer : Node
 		return any;
 	}
 
-	// Product of local Transforms up the parent chain - Node3D.GlobalTransform isn't reliable for a
-	// subtree that hasn't entered the SceneTree yet, which is when FlverLoader calls this.
+	// Local transforms composed up the parent chain: GlobalTransform is identity off-tree.
 	private static Transform3D WorldTransform(Node3D node)
 	{
 		var transform = node.Transform;
