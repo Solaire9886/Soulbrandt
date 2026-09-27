@@ -15,6 +15,9 @@ public partial class MapSfxPreview : Node3D
     private const int BuildsPerRefresh = 2;
     private readonly SfxLoader _loader = new();
     private readonly Dictionary<int, SfxPreview> _active = new();
+    // Evicted previews, hidden and paused; bounded, farthest freed first.
+    private readonly Dictionary<int, SfxPreview> _parked = new();
+    private const int MaxParked = 128;
     private readonly Dictionary<int, string> _unsupported = new();
     private readonly Dictionary<int, SfxPreview> _catalog = new();
     private int _omitted;
@@ -72,7 +75,7 @@ public partial class MapSfxPreview : Node3D
             value = value.LimitLength(20);
             if (value == _previewWindAcceleration) return;
             _previewWindAcceleration = value;
-            foreach (var p in _catalog.Values.Concat(_active.Values))
+            foreach (var p in _catalog.Values.Concat(_active.Values).Concat(_parked.Values))
                 if (GodotObject.IsInstanceValid(p)) p.PreviewWindAcceleration = value;
             _refresh = 0;
         }
@@ -84,7 +87,7 @@ public partial class MapSfxPreview : Node3D
         {
             if (value is not (30 or 60) || value == _zeroWaitPreviewHz) return;
             _zeroWaitPreviewHz = value;
-            foreach (var p in _catalog.Values.Concat(_active.Values))
+            foreach (var p in _catalog.Values.Concat(_active.Values).Concat(_parked.Values))
                 if (GodotObject.IsInstanceValid(p)) p.ZeroWaitPreviewHz = value;
         }
     }
@@ -113,7 +116,8 @@ public partial class MapSfxPreview : Node3D
             foreach (var p in reader.ReadSfxPlacements(MapPath))
                 _placements.Add(_nextPlacement++, new Placement { EffectId = p.EffectId, EntityId = p.EntityID,
                     Name = p.Name, RegionName = p.RegionName,
-                    Transform = new Transform3D(Basis.FromEuler(p.RotationDegrees * (Mathf.Pi / 180)), p.Position) });
+                    // Native region→SFX pose is Ry·Rz·Rx (ELF research 9.5), not Godot's default YXZ.
+                    Transform = new Transform3D(Basis.FromEuler(p.RotationDegrees * (Mathf.Pi / 180), EulerOrder.Yzx), p.Position) });
             _regionCount = _placements.Count;
             _unresolved = _loader.ReadEvents(MapPath).Count - _regionCount;
             foreach (var group in reader.ReadObjects(MapPath).Where(p => p.EntityID >= 0).GroupBy(p => p.EntityID))
@@ -177,6 +181,8 @@ public partial class MapSfxPreview : Node3D
         }
         foreach (int index in _active.Keys.Where(i => !GodotObject.IsInstanceValid(_active[i])).ToArray())
             _active.Remove(index);
+        foreach (int index in _parked.Keys.Where(i => !GodotObject.IsInstanceValid(_parked[i]) || !_placements.ContainsKey(i)).ToArray())
+            _parked.Remove(index);
         float distance = Math.Clamp(PreviewDistance, 1, 100);
         var candidates = _placements.Keys
             .Where(i => _placements[i].Available && _catalog.ContainsKey(_placements[i].EffectId))
@@ -184,12 +190,14 @@ public partial class MapSfxPreview : Node3D
                 var description = _catalog[_placements[i].EffectId];
                 float origin = camera.GlobalPosition.DistanceTo(ToGlobal(_placements[i].Transform.Origin));
                 var scale = (GlobalBasis * _placements[i].Transform.Basis).Scale.Abs();
-                float coverage = Math.Max(0, origin - description.CoverageRadius * Math.Max(scale.X, Math.Max(scale.Y, scale.Z)));
-                return (Index: i, Origin: origin, Coverage: coverage, Cost: description.Cost(origin));
+                float radius = description.CoverageRadius * Math.Max(scale.X, Math.Max(scale.Y, scale.Z));
+                return (Index: i, Origin: origin, Coverage: Math.Max(0, origin - radius), Radius: radius, Cost: description.Cost(origin));
             })
             .Where(p => p.Coverage <= distance + (_active.ContainsKey(p.Index) ? 2 : 0) && p.Cost.Systems > 0)
-            // Small retention margin prevents budget churn at nearly equal distances.
-            .OrderBy(p => Math.Max(0, p.Coverage - (_active.ContainsKey(p.Index) ? 2 : 0)))
+            // Budget priority is apparent size, so a large nearby field outranks small closer
+            // effects (Nexus ground mist was evicted by stair candles). Active effects keep a
+            // 10% margin against churn at nearly equal priorities.
+            .OrderBy(p => p.Origin / (p.Radius + 1) * (_active.ContainsKey(p.Index) ? 0.9f : 1))
             .ThenBy(p => p.Origin).ThenBy(p => p.Index).ToArray();
         var wanted = new HashSet<int>();
         int systemsLeft = MaxSystems, particlesLeft = MaxParticles;
@@ -202,12 +210,15 @@ public partial class MapSfxPreview : Node3D
         }
         foreach (int index in _active.Keys.Where(i => !wanted.Contains(i)).ToArray())
         {
-            _active[index].Free(); _active.Remove(index);
+            _active[index].Park(); _parked[index] = _active[index]; _active.Remove(index);
         }
-        // Release every outgoing LOD before allocating any incoming LOD, respecting both caps
-        // even when system counts and particle capacities change in opposite directions.
-        foreach (var c in candidates.Where(c => wanted.Contains(c.Index) && _active.ContainsKey(c.Index)))
-            _active[c.Index].PrepareViewDistance(c.Origin);
+        while (_parked.Count > MaxParked)
+        {
+            int far = _parked.Keys.MaxBy(i => camera.GlobalPosition.DistanceSquaredTo(ToGlobal(_placements[i].Transform.Origin)));
+            _parked[far].Free(); _parked.Remove(far);
+        }
+        // ponytail: caps count selected LOD bands only; outgoing bands keep their (emptying)
+        // buffers while the effect stays active, so allocation can exceed them up to 5x.
         foreach (var c in candidates.Where(c => wanted.Contains(c.Index) && _active.ContainsKey(c.Index)))
         {
             var active = _active[c.Index];
@@ -221,6 +232,13 @@ public partial class MapSfxPreview : Node3D
             var placement = _placements[index];
             if (!wanted.Contains(index) || _active.ContainsKey(index)) continue;
             if (builds++ >= BuildsPerRefresh) break;
+            if (_parked.Remove(index, out var parked))
+            {
+                parked.Transform = placement.Transform;
+                parked.Resume(candidate.Origin);
+                _active.Add(index, parked);
+                continue;
+            }
             var preview = _catalog[placement.EffectId].CreatePlacementPreview();
             preview.PreviewWindAcceleration = PreviewWindAcceleration;
             preview.ZeroWaitPreviewHz = ZeroWaitPreviewHz;
@@ -247,9 +265,10 @@ public partial class MapSfxPreview : Node3D
     private void ClearActive()
     {
         _omitted = 0;
-        foreach (var preview in _active.Values)
+        foreach (var preview in _active.Values.Concat(_parked.Values))
             if (GodotObject.IsInstanceValid(preview)) preview.Free();
         _active.Clear();
+        _parked.Clear();
         _loader.ClearCache();
         _unsupported.Clear();
         foreach (var description in _catalog.Values) description.Free();
@@ -261,10 +280,21 @@ public partial class MapSfxPreview : Node3D
         if (what != NotificationPredelete) return;
         // Godot frees owned child nodes. Drop managed resource references as well.
         _active.Clear();
+        _parked.Clear();
         foreach (var description in _catalog.Values) description.Free();
         _catalog.Clear();
         _loader.ClearCache();
     }
+
+    // Read by the debug overlay; same figures as Diagnostics' budget line.
+    public Godot.Collections.Dictionary GetSummary() => new() {
+        ["enabled"] = PreviewEnabled, ["placements"] = _placements.Count, ["unresolved"] = _unresolved,
+        ["active"] = _active.Count, ["parked"] = _parked.Count, ["omitted"] = _omitted,
+        ["systems"] = _active.Values.Sum(p => p.LayerCount), ["max_systems"] = MaxSystems,
+        ["particles"] = _active.Values.Sum(p => p.ParticleCapacity), ["max_particles"] = MaxParticles,
+        ["live"] = _active.Values.Sum(p => p.LiveParticleCount),
+        ["catalog"] = _catalog.Count, ["unsupported"] = _unsupported.Count
+    };
 
     private void Report() => Diagnostics =
         $"BILLBOARD PREVIEW ({(PreviewEnabled ? "enabled" : "disabled")}) — supported LOD and constant schedules; general native activation is not executed.\n" +

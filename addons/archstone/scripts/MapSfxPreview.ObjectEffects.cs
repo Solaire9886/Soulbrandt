@@ -49,6 +49,7 @@ public partial class MapSfxPreview
     private void RemovePlacement(int key)
     {
         if (_active.Remove(key, out var preview) && GodotObject.IsInstanceValid(preview)) preview.Free();
+        if (_parked.Remove(key, out preview) && GodotObject.IsInstanceValid(preview)) preview.Free();
         if (_placements.Remove(key, out var placement) && !_placements.Values.Any(p => p.EffectId == placement.EffectId))
         {
             if (_catalog.Remove(placement.EffectId, out var description)) description.Free();
