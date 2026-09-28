@@ -86,12 +86,21 @@ public partial class FlverModelBuilder : RefCounted
 		return index;
 	}
 
+	// A FLVER's node hierarchy as a Skeleton3D description, for skinned or animated FLVERs.
+	// Names are unique Skeleton3D bone names; SourceNames are the nodes' own. Rests are local and
+	// mirrored into Godot space; Skin binds each bone to the inverse of its global rest, so the
+	// mesh (stored in bind pose) is unchanged until a bone moves.
+	public sealed record FlverSkeleton(string[] Names, string[] SourceNames, int[] Parents, Transform3D[] Rests, Skin Skin);
+
 	// Builds an ImporterMesh with every surface's material resolved, plus whether any surface
 	// was actually built (some obj/ FLVER0 files are genuine meshless dummy/anchor markers).
-	public ImporterMesh BuildMesh(string path, out bool anySurface)
+	// A FLVER with any skinned mesh, or animated (withSkeleton), also gets a skeleton, and all of
+	// its surfaces carry bone weights; otherwise skeleton is null.
+	public ImporterMesh BuildMesh(string path, bool withSkeleton, out bool anySurface, out FlverSkeleton skeleton)
 	{
 		string flverPath = ProjectSettings.GlobalizePath(path);
 		var flver = FLVER0.Read(flverPath);
+		skeleton = withSkeleton || flver.Meshes.Any(m => m.UseBoneWeights) ? BuildSkeleton(flver) : null;
 
 		// Keyed by (materialIndex, CullBackfaces) - not materialIndex alone, since a mesh's own
 		// CullBackfaces is a real per-mesh flag that can differ across meshes sharing one
@@ -103,6 +112,9 @@ public partial class FlverModelBuilder : RefCounted
 		foreach (var flverMesh in flver.Meshes)
 		{
 			var material = GetOrBuildMaterial(flverMesh.MaterialIndex, flverMesh.CullBackfaces, flver, materialCache, flverPath);
+			// materialCache is per file, so this reaches only this FLVER's materials.
+			if (skeleton != null && material is ShaderMaterial skinnedMaterial)
+				skinnedMaterial.SetShaderParameter("derive_tangent_frame", true);
 			var (_, isBlend, hasLightmap) = ClassifyMaterial(flver.Materials[flverMesh.MaterialIndex]);
 			// Selected per vertex by v.BoneIndices[0]: one mesh can mix vertices bound to different nodes.
 			var rigidTransforms = GetRigidNodeTransforms(flver, flverMesh);
@@ -121,11 +133,17 @@ public partial class FlverModelBuilder : RefCounted
 			var uvs = new Vector2[vertCount];
 			var uv2s = needsUV2 ? new Vector2[vertCount] : null;
 			var custom0s = needsLightmapCustom0 ? new float[vertCount * 2] : null;
+			var bones = skeleton != null ? new int[vertCount * 4] : null;
+			var weights = skeleton != null ? new float[vertCount * 4] : null;
 			for (int i = 0; i < vertCount; i++)
 			{
 				var v = vertices[i];
-				// Rigid node binding first, in FLVER space; identity for meshes that don't use it.
-				var rigidTransform = rigidTransforms[v.BoneIndices[0]];
+				if (skeleton != null)
+					SetBoneWeights(flverMesh, v, bones, weights, i * 4);
+				// Rigid node binding first, in FLVER space; identity for meshes that don't use it and
+				// for a slot past the palette (o9993's rigid mesh names slot 29 of 28).
+				int slot = v.BoneIndices[0];
+				var rigidTransform = slot >= 0 && slot < rigidTransforms.Length ? rigidTransforms[slot] : System.Numerics.Matrix4x4.Identity;
 				var pos = System.Numerics.Vector3.Transform(v.Position, rigidTransform);
 				// X negated: FLVER space mirrors Godot's.
 				positions[i] = new Vector3(-pos.X, pos.Y, pos.Z);
@@ -176,6 +194,11 @@ public partial class FlverModelBuilder : RefCounted
 				arrays[(int)Mesh.ArrayType.TexUV2] = uv2s;
 			if (needsLightmapCustom0)
 				arrays[(int)Mesh.ArrayType.Custom0] = custom0s;
+			if (skeleton != null)
+			{
+				arrays[(int)Mesh.ArrayType.Bones] = bones;
+				arrays[(int)Mesh.ArrayType.Weights] = weights;
+			}
 			arrays[(int)Mesh.ArrayType.Index] = indices;
 
 			var st = new SurfaceTool();
@@ -192,8 +215,70 @@ public partial class FlverModelBuilder : RefCounted
 		return importerMesh;
 	}
 
+	// Four bone indices and weights per vertex, as skeleton (node) indices. A rigid mesh's vertex
+	// follows its one node, where GetRigidNodeTransforms has already placed it. A skinned vertex
+	// with all-zero weights (whole meshes in e.g. c2101, c4000, o5260) is bound fully to its first
+	// bone, as soulstruct reads them.
+	private static void SetBoneWeights(FLVER0.Mesh mesh, FLVER.Vertex v, int[] bones, float[] weights, int offset)
+	{
+		float sum = v.BoneWeights[0] + v.BoneWeights[1] + v.BoneWeights[2] + v.BoneWeights[3];
+		if (!mesh.UseBoneWeights || sum <= 0)
+		{
+			// A slot past the palette (o9993) binds to the root, which leaves the rest pose exact.
+			int slot = v.BoneIndices[0];
+			bones[offset] = slot >= 0 && slot < mesh.BoneIndices.Length ? Math.Max(mesh.BoneIndices[slot], (short)0) : 0;
+			weights[offset] = 1;
+			return;
+		}
+		for (int k = 0; k < 4; k++)
+		{
+			if (v.BoneWeights[k] <= 0) continue;
+			bones[offset + k] = mesh.BoneIndices[v.BoneIndices[k]];
+			weights[offset + k] = v.BoneWeights[k] / sum;
+		}
+	}
+
+	// Rests are the nodes' local transforms. Godot composes them as full matrices, so a child
+	// inherits its parent's scale, which is Havok's composition whenever the parent's scale is
+	// uniform.
+	// ponytail: non-uniform parent scale (six corpus bones, e.g. c7150 R_Weapon01) composes with
+	// shear instead of Havok's shear-free rule; a per-bone TRS pose solver if it ever shows.
+	private static FlverSkeleton BuildSkeleton(FLVER0 flver)
+	{
+		int count = flver.Nodes.Count;
+		var names = new string[count];
+		var sourceNames = new string[count];
+		var parents = new int[count];
+		var rests = new Transform3D[count];
+		var globals = new Transform3D[count];
+		var used = new HashSet<string>();
+		var skin = new Skin();
+		for (int i = 0; i < count; i++)
+		{
+			var node = flver.Nodes[i];
+			sourceNames[i] = node.Name;
+			// Skeleton3D rejects repeated, empty and ':' or '/' bone names; c6041 and some parts
+			// repeat one (a stub and the real root), so the later one takes its index as a suffix.
+			string name = string.IsNullOrEmpty(node.Name) ? $"Node{i}" : node.Name.Replace(':', '_').Replace('/', '_');
+			names[i] = used.Add(name) ? name : $"{name} ({i})";
+			used.Add(names[i]);
+			parents[i] = node.ParentIndex >= 0 && node.ParentIndex < i ? node.ParentIndex : -1;
+			rests[i] = ToGodot(node.ComputeLocalTransform());
+			globals[i] = parents[i] >= 0 ? globals[parents[i]] * rests[i] : rests[i];
+			skin.AddBind(i, globals[i].AffineInverse());
+		}
+		return new FlverSkeleton(names, sourceNames, parents, rests, skin);
+	}
+
+	// The mirror of a FLVER-space transform (row-vector, as System.Numerics) into Godot space:
+	// S * m * S with S = diag(-1, 1, 1). Rotation stays a rotation and scale stays on its axis.
+	internal static Transform3D ToGodot(System.Numerics.Matrix4x4 m) => new(
+		new Basis(new Vector3(m.M11, -m.M12, -m.M13), new Vector3(-m.M21, m.M22, m.M23), new Vector3(-m.M31, m.M32, m.M33)),
+		new Vector3(-m.M41, m.M42, m.M43));
+
 	// World transform of each node in a static mesh's BoneIndices palette (parents composed).
-	// Unused slots and skinned meshes (UseBoneWeights) get identity: skinning is not implemented.
+	// Unused slots and skinned meshes (UseBoneWeights) get identity: those vertices are stored in
+	// bind pose already.
 	private static System.Numerics.Matrix4x4[] GetRigidNodeTransforms(FLVER0 flver, FLVER0.Mesh mesh)
 	{
 		var transforms = new System.Numerics.Matrix4x4[mesh.BoneIndices.Length];

@@ -119,9 +119,7 @@ public static class MapCollision
 		return new Vector3(-p.X, p.Y, p.Z);
 	}
 
-	// The mirror of a rigid transform, S * m * S with S = diag(-1, 1, 1): still a rotation, for a
-	// shape symmetric about its own X (box, sphere).
-	private static Transform3D ToGodot(System.Numerics.Matrix4x4 m) => new(
-		new Basis(new Vector3(m.M11, -m.M12, -m.M13), new Vector3(-m.M21, m.M22, m.M23), new Vector3(-m.M31, m.M32, m.M33)),
-		new Vector3(-m.M41, m.M42, m.M43));
+	// The mirrored transform is still a rotation, which suits a shape symmetric about its own X
+	// (box, sphere).
+	private static Transform3D ToGodot(System.Numerics.Matrix4x4 m) => FlverModelBuilder.ToGodot(m);
 }

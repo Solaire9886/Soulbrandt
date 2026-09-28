@@ -13,8 +13,12 @@ public partial class FlverLoader : RefCounted
 	private readonly MsbLoader _msbLoader = new();
 	private readonly DrawParamReader _drawParamReader = new();
 
-	// Null: the file has no surfaces (some obj FLVERs are dummy-only markers).
-	private readonly Dictionary<string, ArrayMesh?> _meshCache = new();
+	// Null mesh: the file has no surfaces (some obj FLVERs are dummy-only markers). Null skeleton:
+	// no skinned mesh and no animations.
+	private readonly Dictionary<string, (ArrayMesh? Mesh, FlverModelBuilder.FlverSkeleton Skeleton)> _meshCache = new();
+
+	// A skeleton's Havok animations; null when the model has none.
+	private readonly Dictionary<string, AnimationLibrary> _animationCache = new();
 
 	// Map materials read exposure and tone correction from shader globals; until a map's
 	// PostProcessPipeline drives them they hold a fixed exposure and a neutral correction.
@@ -32,18 +36,56 @@ public partial class FlverLoader : RefCounted
 
 	public Node3D Instantiate(string path)
 	{
-		if (!_meshCache.TryGetValue(path, out var mesh))
+		if (!_meshCache.TryGetValue(path, out var cached))
 		{
-			var importerMesh = _builder.BuildMesh(path, out bool anySurface);
+			var importerMesh = _builder.BuildMesh(path, ModelAnimation.HasSource(path), out bool anySurface, out var skeleton);
 			// ImporterMesh does not render; GetMesh() converts it.
-			mesh = anySurface ? importerMesh.GetMesh() : null;
-			_meshCache[path] = mesh;
+			cached = (anySurface ? importerMesh.GetMesh() : null, skeleton);
+			_meshCache[path] = cached;
 		}
 
+		// A skinned mesh is drawn with its own node's transform, so it is the skeleton's child
+		// ("Skeleton/Mesh") and moves with it under root motion.
 		var root = new Node3D { Name = System.IO.Path.GetFileNameWithoutExtension(path) };
-		if (mesh != null)
-			root.AddChild(new MeshInstance3D { Mesh = mesh, Name = "Mesh" });
+		var skeletonNode = cached.Skeleton != null ? BuildSkeleton(cached.Skeleton) : null;
+		if (skeletonNode != null)
+			root.AddChild(skeletonNode);
+		if (cached.Mesh != null)
+		{
+			var meshInstance = new MeshInstance3D { Mesh = cached.Mesh, Name = "Mesh" };
+			if (skeletonNode != null)
+			{
+				meshInstance.Skin = cached.Skeleton.Skin;
+				meshInstance.Skeleton = "..";
+			}
+			(skeletonNode ?? root).AddChild(meshInstance);
+		}
+		if (cached.Skeleton != null)
+		{
+			if (!_animationCache.TryGetValue(path, out var library))
+				_animationCache[path] = library = ModelAnimation.Build(path, cached.Skeleton);
+			if (library != null)
+			{
+				var player = new AnimationPlayer { Name = "AnimationPlayer" };
+				player.AddAnimationLibrary("", library);
+				root.AddChild(player);
+			}
+		}
 		return root;
+	}
+
+	private static Skeleton3D BuildSkeleton(FlverModelBuilder.FlverSkeleton description)
+	{
+		var skeleton = new Skeleton3D { Name = "Skeleton" };
+		for (int i = 0; i < description.Names.Length; i++)
+			skeleton.AddBone(description.Names[i]);
+		for (int i = 0; i < description.Names.Length; i++)
+		{
+			skeleton.SetBoneParent(i, description.Parents[i]);
+			skeleton.SetBoneRest(i, description.Rests[i]);
+		}
+		skeleton.ResetBonePoses();
+		return skeleton;
 	}
 
 	// "Load Model(s)" and "Load Folder": no MSB, so row 0 of each default_* bank is bound (a default
@@ -96,9 +138,12 @@ public partial class FlverLoader : RefCounted
 		return resolved;
 	}
 
+	private static MeshInstance3D ModelMesh(Node3D inst) =>
+		inst.GetNodeOrNull<MeshInstance3D>("Mesh") ?? inst.GetNodeOrNull<MeshInstance3D>("Skeleton/Mesh");
+
 	private static Node3D CollectCaster(Node3D placement, Godot.Collections.Array<MeshInstance3D> casters)
 	{
-		if (placement.GetNodeOrNull<MeshInstance3D>("Mesh") is MeshInstance3D mesh && mesh.Mesh != null
+		if (ModelMesh(placement) is MeshInstance3D mesh && mesh.Mesh != null
 			&& CastsSunShadow(mesh))
 			casters.Add(mesh);
 		return placement;
@@ -193,7 +238,28 @@ public partial class FlverLoader : RefCounted
 		inst.SetMeta("flver_path", placement.ModelPath);
 		ApplyPartTransform(inst, placement);
 		ApplyDrawParams(inst, blockName, placement, receivesPointLights);
+		ApplyInitialAnimation(inst, placement.InitAnimID);
 		return inst;
+	}
+
+	// An object's InitAnimID clip: posed at its first frame, and played looping when it moves (the
+	// ambient loops; see docs/ARCHITECTURE.md, "Initial object poses").
+	private static void ApplyInitialAnimation(Node3D inst, int initAnimId)
+	{
+		if (inst.GetNodeOrNull<AnimationPlayer>("AnimationPlayer") is not AnimationPlayer player
+			|| inst.GetNodeOrNull<Skeleton3D>("Skeleton") is not Skeleton3D skeleton)
+			return;
+		string clip = ModelAnimation.InitialClip(player.GetAnimationLibrary(""), initAnimId);
+		if (clip == null)
+			return;
+		var animation = player.GetAnimation(clip);
+		ModelAnimation.ApplyFirstFrame(skeleton, animation);
+		player.AssignedAnimation = clip;
+		if (ModelAnimation.IsConstant(animation))
+			return;
+		// The library is shared by every instance of the model; looping is a property of the clip.
+		animation.LoopMode = Animation.LoopModeEnum.Linear;
+		player.Play(clip);
 	}
 
 	// Mirrored: X negated, Y and Z angles negated. The engine composes Ry·Rz·Rx; every multi-axis
@@ -211,7 +277,7 @@ public partial class FlverLoader : RefCounted
 	// as per-surface material overrides.
 	private void ApplyDrawParams(Node3D inst, string blockName, MsbPlacement placement, bool receivesPointLights = false)
 	{
-		if (inst.GetNodeOrNull<MeshInstance3D>("Mesh") is not MeshInstance3D meshInst || meshInst.Mesh == null)
+		if (ModelMesh(inst) is not MeshInstance3D meshInst || meshInst.Mesh == null)
 			return;
 
 		var row = _drawParamReader.GetLightBankRow(blockName, placement.LightID);
@@ -434,11 +500,16 @@ public partial class FlverLoader : RefCounted
 		System.Convert.ToSingle(row[y].Value),
 		System.Convert.ToSingle(row[z].Value));
 
-	public void Evict(string path) => _meshCache.Remove(path);
+	public void Evict(string path)
+	{
+		_meshCache.Remove(path);
+		_animationCache.Remove(path);
+	}
 
 	public void EvictAll()
 	{
 		_meshCache.Clear();
+		_animationCache.Clear();
 		_builder.ResetCaches();
 		_drawParamReader.ResetCaches();
 	}

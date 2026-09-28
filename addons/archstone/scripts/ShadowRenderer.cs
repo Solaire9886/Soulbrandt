@@ -88,9 +88,22 @@ public partial class ShadowRenderer : Node
 		{
 			if (caster.Mesh == null)
 				continue;
-			var clone = new MeshInstance3D { Mesh = caster.Mesh };
-			_viewport.AddChild(clone);
-			clone.Transform = WorldTransform(caster); // both hierarchies are flat, so world == local here
+			MeshInstance3D clone;
+			if (caster.Skin != null && caster.GetParent() is Skeleton3D skeleton)
+			{
+				// A skinned caster is drawn in its skeleton's pose: the copy carries the bone poses
+				// and its "Skeleton/Mesh" child, whose skin and skeleton path are already set.
+				var skeletonClone = (Skeleton3D)skeleton.Duplicate();
+				_viewport.AddChild(skeletonClone);
+				skeletonClone.Transform = WorldTransform(skeleton);
+				clone = skeletonClone.GetNode<MeshInstance3D>(caster.Name.ToString());
+			}
+			else
+			{
+				clone = new MeshInstance3D { Mesh = caster.Mesh };
+				_viewport.AddChild(clone);
+				clone.Transform = WorldTransform(caster); // the viewport root is identity, so world == local
+			}
 			for (int surface = 0; surface < caster.Mesh.GetSurfaceCount(); surface++)
 				clone.SetSurfaceOverrideMaterial(surface,
 					CasterMaterial(caster, surface, depthMaterial, alphaDepthMaterials, far));

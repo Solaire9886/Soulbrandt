@@ -10,7 +10,7 @@ namespace Archstone;
 // frame-global).
 public readonly record struct MsbPlacement(string ModelPath, string Name,
 	Vector3 Position, Vector3 RotationDegrees, Vector3 Scale, byte LightID, byte FogID,
-	byte ToneMapID, byte ToneCorrectID, byte ScatterID, int EntityID = -1);
+	byte ToneMapID, byte ToneCorrectID, byte ScatterID, int EntityID = -1, short InitAnimID = -1);
 
 // A light event: its region's position in Godot space and its POINT_LIGHT_BANK row. Name is for
 // diagnostics.
@@ -237,7 +237,9 @@ public partial class MsbLoader : RefCounted
 				part.FogID,
 				part.ToneMapID,
 				part.ToneCorrectID,
-				part.ScatterID, part.EntityID));
+				part.ScatterID, part.EntityID,
+				// Objects only: the a00_ clip they start in (-1: none).
+				part is MSBD.Part.ObjectBase obj ? obj.InitAnimID : (short)-1));
 		}
 		return placements;
 	}
