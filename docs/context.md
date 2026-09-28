@@ -212,9 +212,9 @@ for the elimination record.
 - **Follow-ups:** scroll was 30× too fast (`g_TexScroll_0` is a velocity; do not normalise it);
   `g_BumpMapSmoose` is a Z bias, and the octaves are not renormalised; the glint weight is
   `g_SpecularMapColor · Power` exactly (`c39`), and multiplying in the sun intensity as well
-  blew it out; the coastal darkening is a shoreline band from the depth buffer, not a
-  camera-distance ramp. The per-vertex distance factor (`f[TEX6]`) could not be re-derived
-  (disassembler ambiguity).
+  blew it out. Two conclusions here were wrong and were replaced on 2026-09-27 (below): the
+  coastal darkening is not a depth-buffer band, and `f[TEX6]` is the vertex colour, not a
+  per-vertex distance factor.
 - `a03_water_in` is "glowing water" (`光る水マテリアル`); `A05_water00[We]_Skin` is the
   Leechmonger arena (`蛭デーモン`); lava deliberately uses the water shader (`溶岩の揺らぎ`).
 
@@ -305,8 +305,9 @@ path. Its bundled Windows tools are for writing only.
   sharpness.
 - Draw-group semantics in DeS.
 - The light-shaft quad edge softness.
-- `env_intensity` overexposure on bright lightmaps (`m0000B0`): re-check under the current
-  exposure pipeline.
+- `env_intensity` overexposure on m01's `m0000B0` (the Old One's arena, seen only in the
+  ending, so in no capture): likely a report from before the adapted exposure; the user
+  considers it a false report (2026-09-27). Kept as a potential issue.
 
 ## C#/Godot interop gotchas
 
@@ -398,14 +399,14 @@ path. Its bundled Windows tools are for writing only.
   again, diagnose the click→signal path in a real windowed session first.
 - An empty `~/godot/Boletaria/` directory after the rename was a harness artefact.
 - Live-pausing RPCS3 to catch one draw.
-- Re-deriving `DS_Water.vpo`'s per-vertex distance factor from the current disassembler output
-  (ambiguous partial-writemask decode).
 
 **Import and textures**
 - Porting the old OBJ exporter's winding swap or V-flip: if inside-out geometry or misaligned
   textures reappear, remove a compensation, do not add one.
 - `DrSwizzler`/Soulstruct's format-generic PS3 deswizzle on DXT textures: makes lightmaps worse.
-  DeS does not swizzle most formats (`Headerizer.Headerize`'s own comment).
+  DeS does not swizzle its DXT formats (`Headerizer.Headerize`'s own comment). Format 10 is
+  swizzled in the file, but `Headerizer` already deswizzles it: never deswizzle its output again
+  (2026-09-27: doing so striped the env term on m02).
 - Removing `GenerateMipmaps` from the uncompressed cubemap path: no effect.
 
 **Lighting and output**
@@ -631,3 +632,73 @@ direction. Both came from data in the captures; no ELF work.
   `MsbLoader.ReadRegionBoxes` used the same default order for the camera-region boxes and now
   uses Y-Z-X too. Mis-oriented debris and rock props read as wrongly lit, because the env cube,
   hemisphere and shadow all follow the rotated normals.
+
+### Effect primitives, emitter curves and swizzled ARGB textures (2026-09-27)
+
+Research in `~/godot/research-dump/ELF_ENGINE_ACCURACY_RESEARCH.md` section 19. Census of every
+distinct MSB-placed effect per map (headless, `SfxLoader.InstantiateLayerPreview`): 121 of 138
+built before, 129 after. Of the other nine, three are IDs that exist in no bank and six build
+no layer.
+
+- **Primitives.** 98 omissions were geometry primitives: action43 61, action20 25, action61 5,
+  action3 4, action24 3. The archived Lua names them (`SetPostEffect`, `AssignBillboard`,
+  `AssignRenderModel`, `AssignLight`); the compiled dispatch table is static data, so every
+  handler resolves directly. Action20 is the fires' far-distance impostor (texture 16, a flame);
+  its X/Y order follows the Lua and gives an upright flame on the square texture.
+- **Distortion constants from captures.** `DS_Sfx_DistortionType1` draws in 172216, 094648,
+  094742 and 205056 carry commoneffects 100/101/113's exact arguments (strength 5, colour
+  alpha 40/255 and 20/255, scroll 0.02/0.05), which fixed the argument-to-constant map. Vertex
+  buffers from `capture_draw_memory` gave the quad (±0.5, UV (0,1) at top-left); the method
+  registers gave SRC_ALPHA/ONE_MINUS_SRC_ALPHA with depth test on, depth write off. A
+  zero-strength render reproduces the background exactly, so the screen copy keeps the
+  scene-buffer encoding. These need a scratch variant of RsxShaderMatch (patched FP disassembly,
+  blend and vertex-array dumps); the repo tool is unchanged.
+- **Format 10.** Bump 22 decoded as vertical stripes through Pfim. First misdiagnosed as a
+  missing deswizzle (the raw TPF bytes are in RSX Morton order, and the GPU memory of m02's
+  EnvDif cube in capture 094438 is byte-identical to them, format register without the LN
+  flag), and a deswizzle was added to both loaders. That double-swizzled the cubes: the user saw
+  dark bands on m02 terrain, and the render put hard stripes on the sacks and a dark wedge on a
+  grass slope that the game shades smoothly. The fork's `Headerizer` output already equals the
+  deswizzled raw bytes on every texel (cube and bump 22); its DDS header declares 24-bit RGB,
+  which is what Pfim misread. Fix: read the `Headerizer` payload as A,R,G,B (as the cube path
+  always did). Checks that did not find it: face-edge continuity of the deswizzled cube, Godot's
+  cube face convention (probe: identical to D3D), the capture's world-space normal in the
+  HemEnv VP, eight up-preserving cube orientations and a no-bump render; all were run on the
+  wrong input. The lesson: compare against what the code actually decodes, not the file bytes.
+- **Distortion orientation.** Seven captured draws of commoneffects 100/101/113 (arg2 = 1)
+  measure 1.20 × 0.75 exactly and turn the quad normal toward the camera position, within 0.7
+  degrees of the view ray even off-centre, X horizontal: not the view-plane billboard first
+  implemented. 82511 (arg2 = 0) stays in its container's plane; most other fog gates set arg2 = 1.
+  At strength 0 in the m02 gate hall the screen copy reproduces the scene within 7/255 (no shift).
+- **Fog-gate faults (second report).** The m02 medium gates (82513, 82521, 82553) create their
+  distortion as a template2023 startup child; it ignored the emitter's action35 lift (2 m), so a
+  4.2 m quad sat half below the floor. On 82511 (o2221) a distortion tile drawn after the fog
+  replaced it with the fog-free screen copy (alpha `colour.a · 2^r` >= 1): a dark square. The
+  distortion now draws first (`RenderPriorityMin`).
+- **Water shoreline.** The m02 river had no coastal fade. `DS_Water`'s output register 13 is
+  `TEX6` (RPCS3's output table), written straight from the vertex colour; `DS_Water_Env` scales
+  the refraction offset and the body mix by its alpha, multiplies the surface by its RGB, and
+  fades to the body below `g_WaterFadeBegin` (captured `c46`/`c48` = 0.7 and 1/0.7, the MTD
+  value). River bank vertices carry RGB 0.5 (all 163 of m1998's are on the mesh boundary). The
+  depth-buffer band, the screen reflection tap and `bias + scale · pow` were stand-ins and are
+  gone. The glint light `c22` (40°, 75°) is `LIGHT_BANK` directional light 0, not the scattering
+  sun `c12`. The refraction tap is decoded (inverse tone matrix, then `/E`) as the engine
+  decodes its scene buffer.
+- **Stale items closed.** The action35 axis conflict noted on 2026-09-24 was fixed by
+  `1dee186` (`PlacementTransform` builds `Ry(−B)·Rx(−A)·Rz(−C)`, the traced native order in
+  mirrored space). The `m0000B0` overexposure is downgraded to a potential issue: the area is
+  m01's ending arena, absent from every capture, and the report predates the exposure pipeline.
+- **Bump orientation.** The earlier note "TBN roles swapped" was naming only: the HemEnv bump
+  program puts Y along the FLVER tangent and X along `cross(N, T)·w`, and on all 114 bumped
+  m02 pieces (320,813 triangles) those are the +V and +U UV gradients (mean dots 0.94, 0.95).
+  The real fault was the sign: a probe shader comparing Godot's `BINORMAL` with the
+  screen-derivative `dP/dv` gave −V on every pixel (`TANGENT` +U on every pixel), so all bump
+  relief was lit upside down. Fixed in `hemisphere_pixel_normal`; the m02 parapet now catches
+  the hemisphere light on its upper rims. Water takes its wave normal as world `(x, z, y)` as
+  `DS_Water_Env` does, instead of through the tangent frame.
+- **Emitter curves.** Five effects (99030 in every map; 13070, 95200, 95300, 96101) curved only
+  emitter speed/size and action55 gravity. Emitter handlers evaluate their sequences when they
+  run, so per emission; gravity follows motion84's cluster clock (section 10.5), inferred for
+  action55. 99030's two template2020 children still skip: their curved radius and rotation move
+  the child-effect frames.
+- **Main bank.** m08 places 520/540/560/580, which exist only in `ds_sfxbnd_main`.

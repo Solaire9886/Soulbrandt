@@ -135,6 +135,9 @@ These are correct as implemented; do not "fix" them.
   why it went unnoticed until a map was recognised as its sibling's mirror image.
 - **Triangle winding is swapped** because of that negation (mirroring flips apparent winding;
   Godot's front face is clockwise).
+- **Cubemap lookups negate X** (`CUBE_MIRROR`, and in `water.gdshader`): the faces are loaded
+  as shipped, in FLVER space. Without it lightmap-less HemEnv surfaces, which take the full env
+  term, sample the opposite side (m02's tree cards in `m0202b0` rendered near-black).
 - **No UV V-flip.** `Image.CreateFromData` uses the decoded texture's row order.
 - **UV scale is always 1024** for DeS. The fork patches `SoulsFormatsNEXT`'s header-version
   heuristic, which picks 2048 for some files; re-check after any upstream sync.
@@ -153,7 +156,10 @@ These are correct as implemented; do not "fix" them.
   when not in the tree. Placements are built off-tree, so anything needing a world position
   during the build composes local transforms by hand.
 - Geometry is built as arrays and handed over in one `SurfaceTool.CreateFromArrays()` call;
-  `GenerateTangents()` runs afterwards. The lightmap UV of blend materials rides in
+  `GenerateTangents()` runs afterwards. **Bump Y is negated:** DeS bump maps put X along +U and
+  Y along +V (the fragment program's Y axis is the FLVER tangent, X is `cross(N, T)·w`;
+  measured on every bumped m02 piece), while Godot's generated `BINORMAL` points along −V.
+  `hemisphere_pixel_normal` subtracts the Y term. The lightmap UV of blend materials rides in
   `Custom0` (`RgFloat`, passed through `ImporterMesh.AddSurface`'s `flags`).
 - **Zero-mesh objects are real:** 62 of 1068 `obj/` FLVERs have no mesh (57 dummy-only
   attach markers, 5 empty stubs). Destructible-prop debris (`o6511`–`o6602`) pairs a
@@ -188,9 +194,14 @@ with a warning. Untyped texture entries get their slot from the MTD's bracket ta
 (`InferMissingParamNames`, verified on 83 materials). Pfim decodes DXT; its buffer holds the
 whole mip chain, so the base level is sliced out before `Image.CreateFromData`.
 
+**TPF format 10** (uncompressed ARGB8888): the TPF bytes are in RSX swizzled order, which the
+fork's `Headerizer` already undoes, but its DDS header declares 24-bit RGB, so Pfim misreads the
+32-bit payload. `DecodeArgbImage` reads it directly as A,R,G,B. Format 10 holds the env cubemaps
+of m02/m04/m06/m08/m99, a few 2D map textures (`m08_0808`, `m99_9700`) and the SFX bump texture 22.
+
 **Cubemaps** (`DecodeCubemap`): Pfim decodes only face 0, so each face is re-wrapped as its own
-DDS. Uncompressed ARGB8888 faces (m02/m04/m06/m08/m99) bypass Pfim entirely and are read as
-A,R,G,B (Pfim misreports them as `Rgb24` and rotates the channels into a rainbow).
+DDS. Format-10 faces bypass Pfim (it misreports them as `Rgb24` and rotates the channels into a
+rainbow) and go through `DecodeArgbImage` per face.
 `Cubemap.get_layer_data()` reads back blank under Compatibility; verify cubemaps by rendering.
 
 ### Material data
@@ -258,9 +269,12 @@ disabled `MapSfxPreview`.
   that could appear; the gate is event scripting); `o1450_0001`–`_0003` sit at the origin in
   the data itself (`InitAnimID = −1`, likely inactive stubs); reused bodies such as `o0500`
   render in bind pose because `InitAnimID` needs animation playback.
-- **`DrawGroups`/`DispGroups` are not used.** Every map piece and object has all-zero
-  `DispGroups`; applying the DS1 visibility rule deleted most of m02. DeS may not draw-group
-  cull map geometry at all. Needs a capture comparison before anything culls on it.
+- **`DrawGroups`/`DispGroups` are not used.** In DeS, map pieces and objects carry group
+  membership in `DrawGroups` (`DispGroups` all zero); collisions carry their own group as one
+  `DispGroups` bit and the groups visible from them in `DrawGroups`. Map SFX are created only
+  while their event part's `DrawGroups` meet the active group mask (per map block, observed);
+  that the active mask is the current collision's `DrawGroups` is inferred. Applying the DS1
+  rule against `DispGroups` once deleted most of m02. Needs a player on collision first.
 - `IsShadowSrc/Dest/Only` are zero on every part (likely mis-named fields upstream);
   `Collision.EnvLightMapSpotIndex` is zero everywhere.
 
@@ -385,7 +399,8 @@ Each entry-point shader calls `DES_ATMOSPHERE_VERTEX(world_position)` in `vertex
   (the game applies `M` once to the blended buffer).
 - `FlverLoader.ApplyDrawParams` binds light, fog and scatter rows per placement as a
   per-surface override (`Duplicate()` of the cached base material), gated by which uniforms
-  the shader declares (`HasUniform`), so water gets the output stage without light uniforms.
+  the shader declares (`HasUniform`), so water gets the output stage and its glint direction but
+  no other light uniforms.
 - Compatibility renders RGBA8 without an HDR target, so exposure has to happen in the
   material shader, exactly where DeS does it. There is no colour-space conversion anywhere:
   `: source_color` is a no-op on fetch under Compatibility, there is no output sRGB encode,
@@ -406,29 +421,37 @@ Each entry-point shader calls `DES_ATMOSPHERE_VERTEX(world_position)` in `vertex
   `FlverLoader.PointLightsOnMapPieces` (default off) extends them to map pieces as a
   deliberate departure. The PC Remaster mod achieves torch light on geometry by converting
   host map pieces into objects and adding hand-placed regions.
-- **`env_intensity`** runs 1.5–5×; bright lightmap texels on a few pieces (e.g. `m0000B0`,
-  Old One ground, 4.5×) may overexpose. A clamp was tried and reverted. Re-check after the
-  exposure pipeline before acting.
+- **`env_intensity`** runs 1.5–5×. The one reported overexposure, m01's `m0000B0` (the
+  Old One's arena floor, row 3, 4.5×), predates the adapted exposure and the exact atmosphere,
+  and the area is meant to read bright. No capture covers it: the game shows it only in the
+  ending. A potential issue, probably a false report. A clamp was tried and reverted.
 
 ### Sun shadows (`ShadowRenderer`)
 
 The game uses **four perspective shadow-map splits** in a 2048² Z24S8 atlas of 2×2 1024²
 tiles, with the PSM fields `calibulateFar`/`persedDepthOffset`/`radFactor`; map pieces get
 one cascade matrix per draw (`c112..c115`), characters select per pixel; one hardware 2×2
-compare; composite `1 − (density − tint) · fade · inShadow` per channel, with
+compare; composite `1 − (density − tint) · g_ShadowPowMul · fade · inShadow` per channel, with
 `fade = saturate((fadeBeginDist + fadeDist − d)/fadeDist)` on radial distance.
+`g_ShadowPowMul` is the MTD's (1 when absent). Only lightmap-less MTDs carry it: 0.8 on
+ordinary map and character materials, 0.4 hair, 0.5 body and face, 0 on `c[dn]`; lightmapped
+materials take the bank's density unscaled (confirmed in every capture, including a tinted row).
 
 Soulbrandt's stand-in (v2) is **one static orthographic depth pass** per map, from
 `SHADOW_BANK` row 0's direction, over the lit casters' bounds (radius `min(½·diagonal + 2,
 200)`), into a 2048² `SubViewport`. Casters are sibling `MeshInstance3D`s sharing each mesh
 with `shadow_depth.gdshader` (`cull_front`, linear light-space depth packed 16-bit across
-R,G). Receivers (`sun_shadow` in `hemisphere_ambient.gdshaderinc`) use a rotated 12-tap
-Poisson PCF and the engine's composite, density, tint and distance fade. Uniforms are bound
-once; only the fade depends on the camera. Exact: direction, density, tint, fade, volume
-depth, composite. Missing: the splits and PSM warp (which follow the camera, so they wait for
-a gameplay camera; camera-following versions made shadows slide), per-draw cascade selection,
-alpha-tested casters, the "Load Folder" path, and a load target with a non-identity transform
-(the caster clones live in their own world). At about 0.2 m per texel it cannot resolve
+R,G); alpha-tested surfaces take `shadow_depth_alpha.gdshader`, which also discards below the
+material's alpha threshold (still `cull_front`: casting both faces self-shadowed closed
+alpha-tested meshes). Its effect is minor at this resolution (190 texels in m04, 33 in m05;
+m02's cutouts lie outside the region). Receivers (`sun_shadow` in
+`hemisphere_ambient.gdshaderinc`) use a rotated 12-tap Poisson PCF and the engine's composite,
+density, tint, `g_ShadowPowMul` (`shadow_pow_mul`) and distance fade. Uniforms are bound once;
+only the fade depends on the camera. Exact: direction, density, tint, `g_ShadowPowMul`, fade,
+volume depth, composite. Missing: the splits and PSM warp (which follow the camera, so they
+wait for a gameplay camera; camera-following versions made shadows slide), per-draw cascade
+selection, the "Load Folder" path, and a load target with a non-identity transform (the caster
+clones live in their own world). At about 0.2 m per texel it cannot resolve
 a prop's self-shadowing, which the game's splits do at millimetre scale near the camera.
 
 ### Water (`water.gdshader`)
@@ -436,13 +459,23 @@ a prop's self-shadowing, which the game's splits do at millimetre scale near the
 Reconstructed from `DS_Water_Env` (107 instructions), `DS_Water`, the water `.mtd` and six
 captured water draws. Three bump octaves at `UV · g_TileScale_i.x + g_TexScroll_0 ·
 g_TileScale_i.y · TIME`, summed by `g_TileBlend_i` (not renormalised), Z reconstructed and
-biased by `g_BumpMapSmoose`; Fresnel `bias + scale · pow(1 − N·V, pow)` (`pow = 0` →
-constant); reflection = `g_Envmap` cubemap (tiny, e.g. 32 px) + a screen tap + a sun glint
-`pow(R·sun, 100)` weighted by `g_SpecularMapColor · Power` only; body = depth-guarded screen
-refraction tinted by `g_WaterColor`; a shoreline band of width `g_WaterFadeBegin` mixes toward
-the water colour; then `des_output`. The captured water absorption equals the scattering
-extinction exactly. `DS_Water_Reflect`/`DS_Water_Mask` are unused; `DS_Water_Env_Skin` is the
-Leechmonger arena only. The shoreline band's shape is an approximation.
+biased by `g_BumpMapSmoose`. The wave normal is read as the world normal `(x, z, y)` (flat water,
+no tangent frame). With `a` the vertex alpha and `C` the vertex RGB (both passed
+through unchanged by `DS_Water`):
+
+- body = `mix(refraction, g_WaterColor.rgb, a · g_WaterColor.a)`; the refraction tap is offset
+  by `wave.xy · g_RefractBand · a` and decoded from the scene buffer to scene radiance;
+- Fresnel `g_FresnelScale · (bias + (1 − bias) · (1 − N·V)^g_FresnelPow)`;
+- reflection = `g_Envmap` cubemap (tiny, e.g. 32 px) `· g_FresnelColor` + a sun glint
+  `pow(R·L, 100) · g_SpecularMapColor · Power`, where `L` is `LIGHT_BANK` directional light 0,
+  not the scattering sun; there is no screen-space reflection tap (`g_ReflectBand` is unused);
+- surface = `mix(body, reflection, F) · C`, then `des_output`;
+- final = `mix(body, surface, min(a, g_WaterFadeBegin) / g_WaterFadeBegin)`.
+
+The shoreline is authored in the vertex colour: m02's river banks carry RGB 0.5 (interior 1.0),
+and shallow pools carry alpha 0.1–0.3, which shows the bed through the water.
+`DS_Water_Reflect`/`DS_Water_Mask` are unused; `DS_Water_Env_Skin` is the Leechmonger arena
+only. The engine's refraction guard tests the scene buffer's alpha; ours tests depth.
 
 ### Sky and unlit materials
 
@@ -529,7 +562,8 @@ Fixed vertex registers: `c103` fog, `c104..c111` scattering, `c112..c115` shadow
 ## Effects (VFX)
 
 `SfxLoader` reads `.ffx` files from `mounted/sfx/<bank>/` (map bank first, then
-`commoneffects`) through the fork's DeS mode of `FFXDLSE` (3,091 of 3,091 files parse).
+`commoneffects`, then `main`, which holds some m08 placements) through the fork's DeS mode of
+`FFXDLSE` (3,091 of 3,091 files parse).
 `SfxPreview` builds billboard layers from fingerprint-verified templates (2117 LOD selection,
 2023 schedules, 2121/2123/2101 containers, 2020 child-effect emission); `SfxBatchParticles`
 schedules births on the CPU and draws each layer as one `MultiMesh`, because
@@ -553,6 +587,30 @@ sections 2–11, `OPEN_ENGINE_ACCURACY_PROBLEMS.md` section E, `VFX_PLAYBACK.md`
   closed-form preview with an inferred gravity sign.
 - **Type2 sprites** (`DS_Sfx_SimpleSpriteType2`) fade by depth intersection over a slab of
   thickness `(width + height)/2`.
+- **Action46 `MoveCamera`** (container motion): the container leaves its parent and rides the
+  camera, its local pose read in native camera space (+Z forward, inferred), following position
+  and rotation. Camera-attached effects are always in the map preview's range. Used by the m05
+  rain (95000) and m08 mist (98100); m05's rain sits 13 m ahead of the view.
+- **Emitter and gravity sequences:** speed and size-multiplier sequences of emitters 28–32 are
+  sampled per emission on the instance clock (time since the 2023 instance's startup); an
+  action55 gravity sequence is evaluated on the same clock, as motion84's is (inferred for
+  action55), through its integrals. Size ranges of 28–31 stay omitted, as on the constant path.
+- **Action20 `AssignBillboard`** (template2101 geometry): one sprite at the container's pose for
+  the container's life, played as a one-particle layer with the cluster's size, colour, frame
+  and shader-type rules (the host builds the same render descriptor). Scale Y precedes scale X
+  (the archived Lua's order). Fires use it as their far-distance impostor.
+- **Action43 `SetPostEffect`** (template2101 geometry), type 1: the bump distortion of
+  `DS_Sfx_DistortionType1`/`Type5` (`sfx_distortion.gdshader`, constants read from captured
+  draws). A quad of `±0.5 × (scaleX, scaleY)`, its normal turned toward the camera position with
+  X kept horizontal when `pointToCamera` is set (captured draws), else in the container's XY
+  plane, samples
+  the scene at its screen position plus `bump.xy · strength · max(1 − r, 0) · 0.01` (bump
+  scrolled by args 12/13), times the colour and optional mask, alpha `colour.a · 2^r`, alpha
+  blended with depth test and no depth write. It draws before every other transparent surface:
+  Godot's screen copy holds only opaque geometry, and `colour.a` is 1 on most fog gates, so drawn
+  later it would erase the fog behind it. Used over map fires, torches and fog gates.
+- **Template2023 startup children** (arg 16) start at the instance's pose, its placement
+  (arg 3) included; fog gates lift their distortion to the fog emitter's height this way.
 - **Action104** (camera-distance fade) is parsed and not applied: it writes only the effect
   instance's faded colour word, which billboard clusters never read.
 - **Blending:** transparency 0 and 4 additive, 2 alpha (verified against capture draws).
@@ -568,10 +626,12 @@ node makes the Scene dock re-walk the whole scene. Prepared effect descriptions 
 samples are shared between placements.
 
 **Not implemented:** native activation and event-script control (map Lua enables effects by
-entity ID), container translation (action1) and camera follow (action46), native action34
-axes, geometry primitives (actions 3/20/24/43/61), curve-driven schedules, templates
-2104/2115/2022/2024, native motion cadence, map wind, and the sprites' per-vertex fog and
-scattering factors. Map-ambient coverage: 64 of 86 effects build.
+entity ID), display-group gating of map SFX, container translation (action1), action46's position-only mode, native action34
+axes, model primitives (actions 3/61), lights (action24), action43's radial-wave type and
+nonzero shapes, action20's Y-axis mode, moving child-effect emitters (curved template2020
+radius or rotation), templates 2104/2115/2022/2024, native motion cadence, map wind, and the
+sprites' per-vertex fog and scattering factors. Coverage: 129 of the 135 distinct MSB-placed
+effects that exist build at least one layer (three referenced IDs exist in no bank).
 
 ## Debug overlay
 
@@ -603,7 +663,8 @@ applies to `AssetExtractor` and `FlverLoader`, which still do real I/O and decod
   `Cs_ShadowMan` (Shadow Man, `DS_Ghost_ParamTod/ParamSkin`), each with its own `g_Ghost*`
   parameters, currently render through the ordinary path. Not to be confused with `DS_Gst_*`.
 - Light-shaft quads (`A05_vollight` etc.) read harder at their edges than in RPCS3.
-- `env_intensity` overexposure on a few bright lightmaps (see "Lighting details").
+- Possible `env_intensity` overexposure on bright lightmaps; unconfirmed (see "Lighting
+  details").
 - Character/parts armor: vanilla uses HemDir3 (no cubemap). The PC Remaster mod's reflective
   armor re-tags those MTDs to HemEnv with re-tuned specular; it is an enhancement, not a
   restoration.

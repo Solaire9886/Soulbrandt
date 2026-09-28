@@ -57,7 +57,7 @@ point light and per-frame light selection, DoF, motion blur, lens flare, `HemEnv
 transitions.
 
 **Graphics and VFX items that do not:** light-shaft edge softness; ghost/dissolve materials;
-VFX activation, container motion, geometry primitives and the remaining templates (see
+VFX activation, container motion, the model and light primitives and the remaining templates (see
 `docs/ARCHITECTURE.md`, "Effects").
 
 ## Phase 2: game recreation (not yet designed)
