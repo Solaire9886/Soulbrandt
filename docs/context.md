@@ -702,3 +702,73 @@ no layer.
   action55. 99030's two template2020 children still skip: their curved radius and rotation move
   the child-effect frames.
 - **Main bank.** m08 places 520/540/560/580, which exist only in `ds_sfxbnd_main`.
+
+### Havok packfile reader and map collision (2026-09-27)
+
+The user chose to build Havok support into the fork one content type at a time, collision
+first, with the 2018 kata branch and soulstruct-havok (from the `io_soulstruct` Blender add-on
+zip, `soulstruct-havok/src/soulstruct/havok/types/hk550`) as references.
+
+- **Census of `mounted/`:** 7,625 `.hkx` files: map collision (2,918), object physics (846,
+  `hkpPhysicsData`), character skeletons, animations and bindings (5,128), two in `Animation/`.
+  Versions 5.5.0 (most), 5.1.0 (m02, m03, m07 and m99 collisions; some chr) and 4.x (a few
+  chr/obj/m99). One chr file is little-endian.
+- **No type descriptions.** An earlier assumption that the files describe their own layouts was
+  wrong: `__types__` is empty in every file inspected, and 5.1.0 files put `__data__` before
+  `__types__`. Layouts come from soulstruct-havok's 5.5.0 classes; the same offsets decode the
+  5.1.0 files.
+- **Which files are walkable:** every MSB collision part names an `h` file; `l` files (with both
+  `b` and `B` spellings) are never referenced. `m07_02` and `m99_99_98_05` name files that are
+  not on disk (unused blocks).
+- **Checks.** Scratch Python prototype and the C# reader agree on all map `h`/`l` files: 6,759
+  submeshes, 3,818,526 triangles, every index in range, every vertex finite (1.7 s for the
+  whole set). Downward/upward ray casts (4,000 per map) hit front faces mostly from above on
+  m01, m02, m03_01 and m05 (m02: 1,386 down, 441 up), which fixes the winding swap; m08's
+  collision encloses the whole map, so every ray hits both ways there. Rendered overlays
+  at the 094438 camera and an elevated m02 view line up with the parapet, battlements, stairs and
+  ballistae; m08's apparent offset in an overlay was an uncollided roof hiding the rooms below.
+  On m08, 14 of 23 `h`/`m` model pairs have identical local bounds, confirming the shared
+  transform. Collision adds 0.15-0.36 s to a 6-7.5 s map load.
+- **Follow-up (same day): convex shapes, the fourth index word, surface types.**
+  - soulstruct-havok has no 32-bit layouts for `hkpBoxShape`, `hkpConvexVerticesShape` or
+    `hkpConvexTranslateShape`; their offsets were read from the two retail map files and
+    hold across the objects. The first hull fans used a tolerance scaled by world
+    coordinates (4 cm at m03_01's 410 m) and merged adjacent faces; on-plane residuals are
+    below 1e-4 and the nearest off-plane vertices 1e-3, so 0.5 mm is fixed. All map hulls
+    then close; 50 of 966 object hulls still fan wrongly (the object step).
+  - Winding: the first box and hull faces were wound counter-clockwise, the opposite of the
+    storage meshes (whose (b − a) × (c − a) points down on 900,220 faces and up on 468,651).
+    Flipped; ray probes on the m03_03 box (hit from above and below) and the m03_01 hull (hit
+    from outside, missed from inside) confirm it.
+  - The fourth index word of extended storage meshes is exporter garbage: after 0, the most
+    common values are `0xCDCD`, `0x3F80` (the top of float 1.0), `0xFFFF`, `0xDDDD`; 27,361
+    distinct values. soulstruct-havok's "face flags" reading of it is not supported.
+  - Surface types: no DeS paramdef names map materials (DS1's `HitMtrlParam` has no
+    counterpart). Matching each collision triangle to the diffuse texture of the nearest
+    render triangle within 1 m, over 15 main blocks, reproduces DS1's scheme (table in
+    ARCHITECTURE.md). Collision is now split per surface type with `surface_type` metadata.
+- **Object collision (same day).** The reader now returns shapes rather than triangles
+  (`ReadCollisionShapes`), and object placements get static bodies from `obj/<id>/hkx/<id>.hkx`.
+  - Census of `obj/`: 846 files, 817 Havok 5.5 and 29 Havok 4.x (none placed in a retail MSB;
+    checked by name against every retail `.msb`). 5.5 classes not read before:
+    `hkpConvexTransformShape` (1,868), cylinder (31), sphere (28), capsule (12). Offsets read
+    from the bytes: transform child +24, `hkTransform` +32; capsule ends +32/+48; cylinder core
+    radius +20, ends +32/+48, whose w lanes equal core + convex radius (o0141: 0.7263 + 0.05).
+  - `<id>_1.hkx` is the broken state of a breakable object: the base file holds one or a few
+    fixed bodies (motion type 7), `_1` 10–90 box-inertia debris bodies (4, some 2). Base files
+    also hold keyframed (6, 615 bodies) and dynamic (4, 507) bodies; all are placed static.
+  - Hulls from planes, dropped: of 969 hulls, 254 failed an edge-pairing check, mostly because
+    one face is stored as several coplanar planes (o2322: 8 vertices, 12 planes). The hull is now
+    handed to Godot as points; the old fan code is gone.
+  - Rotation storage: `hkTransform` columns, confirmed in file space against FLVER vertices
+    for objects with rotations of 30–180° (o1616 88% inside its box against 30% for rows,
+    o6472 53% against 14%, o5887 23% against 9%; others equal). Godot fits on m05 match the
+    file-space ones (o5600 49% and 46%), so the S·R·S mirror is right.
+  - Checks: all 3,764 map and object files read with no skipped shape; 10 degenerate hulls
+    (under 4 points) only in `_1` files. Object bounds centres agree with the FLVERs for 369/374
+    (m02) and 876/894 (m04) bodies; the rest have no visible mesh (invisible walls such as
+    o2511) or cover part of the object (o4421's top slab). Object collision adds 12–62 ms per
+    map. m02 map collision is unchanged (71,643 triangles, 1,380 downward hits); the m03_01 hull
+    probes give the same hit points as before.
+- **Not yet read:** object simulation (motion types, mass, constraints), Havok 4.x files and
+  everything animation-side.

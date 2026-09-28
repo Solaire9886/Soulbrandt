@@ -22,6 +22,8 @@ explored in the editor. Phase 1 is done when that works, not when every format i
 - FLVER0 meshes, TPF textures and cubemaps, MTD-driven material routing, through a manual
   loader rather than Godot's import system.
 - MSB map pieces and objects with engine-accurate transforms; SFX and point-light events.
+- Map and object collision: a Havok packfile reader in the fork, and every MSB collision and
+  object part as a Godot static body.
 - The map rendering pipeline reconstructed from the shader library, frame captures and
   executable specifications: HemEnv/HemDir3 lighting, lightmaps, env cubemaps, point lights,
   fog, scattering, water, sky, exposure adaptation, bloom, tone correction, and a static sun
@@ -32,23 +34,21 @@ explored in the editor. Phase 1 is done when that works, not when every format i
 **Priority (user decision, 2026-09-06).** Most remaining graphics work needs a moving,
 gameplay-matched camera to implement and verify: four-split shadows, water viewing-angle
 accuracy, and anything tuned against the player's view. So the next major step is game-side:
-**Havok collision parsing and a real player and camera**. Graphics and VFX items that do not
-need a camera may still be taken on in between (the 2026-09-14 to 09-26 VFX and lighting work
-was such an interlude).
+**Havok collision parsing (done 2026-09-27) and a real player and camera**. Graphics and VFX
+items that do not need a camera may still be taken on in between (the 2026-09-14 to 09-26 VFX
+and lighting work was such an interlude).
 
 **Next, roughly in order**
-1. **Havok (`.hkx`) collision parsing.** Base: the unmerged 2018 `old-kata-2018-dec-13`
-   branch of upstream `SoulsFormatsNEXT` (a DeS-aware packfile reader and a rough collision
-   mesh reader). Reference: `Grimrukh/soulstruct-havok` (GPL, Python, DeS-specific).
-   `SoulsAssetPipeline`'s Havok reader does not support DeS's Havok 5.5.
-2. **A player and camera** on that collision.
-3. **Skeleton and animation import** (`hkaSkeleton`, `hkaAnimationContainer`; DeS animations
-   are wavelet-compressed), then posing (`InitAnimID` on placed objects).
-4. **Map assembly:** navmesh (`NVM` already reads it), enemy/player placement once game logic
+1. **A player and camera** on the map collision.
+2. **More Havok content on the same reader**, one class family at a time: skeletons
+   (`hkaSkeleton`; object shapes are done, as static collision), then animation
+   (`hkaAnimationContainer`; DeS animations are wavelet-compressed) and posing (`InitAnimID`
+   on placed objects). Reference: `Grimrukh/soulstruct-havok` (GPL, Python, DeS-specific).
+3. **Map assembly:** navmesh (`NVM` already reads it), enemy/player placement once game logic
    exists (deliberately deferred until then), draw-group visibility (semantics unknown for
    DeS; needs a capture comparison), LOD selection, event scripts (`script/` Lua and `.esd`),
    destructible debris (`map/breakobj/*.breakobj`), cutscenes (`remo/`).
-5. **A runtime loader** for exported builds: no editor, no pre-extraction step, reading the
+4. **A runtime loader** for exported builds: no editor, no pre-extraction step, reading the
    player's own copy at play time. `AssetExtractor` and the loaders have no editor
    dependency, so the parsing code carries over.
 

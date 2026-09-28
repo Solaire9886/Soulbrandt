@@ -81,6 +81,7 @@ code, assets or decryption.
 | `scripts/DrawParamReader.cs` | Draw-parameter bank rows and env cubemap names. |
 | `scripts/ShaderLibrary.cs` | Reads the shader library's names as data (material → shader family/features). |
 | `scripts/ShadowRenderer.cs` | Static sun-shadow depth pass per loaded map. |
+| `scripts/MapCollision.cs` | MSB collision and object parts as static bodies from their Havok shapes. |
 | `scripts/PostProcessPipeline.cs` | Exposure adaptation and bloom (the game's post chain). |
 | `scripts/SfxLoader.cs`, `SfxPreview*.cs`, `SfxBatchParticles.cs` | FFX effect reading and billboard playback. |
 | `scripts/MapSfxPreview*.cs` | Per-map effect controller (MSB events, object and camera-region sources). |
@@ -252,8 +253,9 @@ sky, which silently skewed every early comparison.
 ## MSB placement
 
 `FlverLoader.InstantiateMap(msbPath)` builds a map root holding a `WorldEnvironment`, the
-`PostProcessPipeline`, every `MapPiece` and `Object` placement, a `ShadowRenderer` and a
-disabled `MapSfxPreview`.
+`PostProcessPipeline`, every `MapPiece` and `Object` placement, a `ShadowRenderer`, the map's
+collision (`Collision`), the objects' collision (`ObjectCollision`) and a disabled
+`MapSfxPreview`.
 
 - **Map pieces** resolve `ModelName` case-insensitively in `map/<block>/`. Most carry an
   identity transform (their vertices are in world space); reused ones carry a real one.
@@ -262,8 +264,17 @@ disabled `MapSfxPreview`.
   **Y, then Z, then X** (`RotationOrder = EulerOrder.Yzx`). Every multi-axis object in eight
   RPCS3 captures matches this to 1e-6; Godot's default YXZ missed by up to 1.9. MSB regions
   use the same convention.
-- **Not placed:** `Enemy`/`Player` (deliberately, until game logic exists), `Collision`
-  (Havok, no parser), `Navmesh` (`SoulsFormatsNEXT` `NVM` reads it; unwired),
+- **Collisions** resolve to `map/<block>/<ModelName>.hkx` (extension case varies) and become
+  `StaticBody3D`s with one `ConcavePolygonShape3D` per surface type, placed with the same
+  transform code as map pieces (m08's parts carry real transforms). Parts reference only the
+  `h`-prefixed files; the `l`-prefixed ones (both `b` and `B` spellings) are never placed. See
+  "Havok collision".
+- **Object collision** resolves to `obj/<id>/hkx/<id>.hkx` (552 of the 777 objects have one)
+  and becomes one `StaticBody3D` per object placement, with the object's transform. Every body
+  is static, including the ones the file marks dynamic or keyframed; `<id>_1.hkx` (the broken
+  state of a breakable object: tens of dynamic debris bodies) is not placed.
+- **Not placed:** `Enemy`/`Player` (deliberately, until game logic exists), `Navmesh`
+  (`SoulsFormatsNEXT` `NVM` reads it; unwired),
   `DummyObject`/`DummyEnemy`, `ConnectCollision`.
 - **Known data oddities:** some objects are event- or cutscene-gated (MSB lists everything
   that could appear; the gate is event scripting); `o1450_0001`–`_0003` sit at the origin in
@@ -291,6 +302,83 @@ disabled `MapSfxPreview`.
 **Per-part draw parameter IDs** (`MsbPlacement`): `LightID`, `FogID`, `ScatterID` are bound
 per placement; `ToneMapID`/`ToneCorrectID` feed frame-global passes (see "Draw parameters").
 `255` means unset.
+
+## Havok collision
+
+The fork's `HKX` class (`SoulsFormats/Formats/HKX/`) reads Havok packfiles: header, sections,
+local/global/virtual fixups, and objects by class name. DeS ships Havok 5.5.0 and 5.1.0 files
+(and a few 4.x in `chr`/`obj`/`m99`), big-endian with 4-byte pointers, **with no type
+descriptions** (`__types__` is empty; the section order also differs between versions), so
+object layouts are fixed per class in code. Member offsets follow soulstruct-havok's 5.5.0
+definitions (GPL-3.0-or-later) and hold for the 5.1.0 files too.
+
+`HKX.ReadCollisionShapes` follows each `hkpRigidBody` (transform at +224; identity in every
+retail map file) through its shape tree and returns each leaf shape in its own space with its
+accumulated transform. Havok's convex radius (+16 in every convex shape) is added to box,
+sphere, capsule and cylinder sizes.
+
+- `CustomParamStorageExtendedMeshShape` (FromSoftware's subclass, most map files) and
+  `hkpStorageExtendedMeshShape`: `hkVector4` vertices, four 16-bit indices per triangle; the
+  surface type is `materialArray[i].materialNameData`. The fourth index word is uninitialised
+  exporter memory (0, else fill patterns such as `0xCDCD`, `0xDDDD`, `0xFFFF`; 27,361 distinct
+  values) and is not read.
+- `hkpStorageMeshShape` (5.1.0 files): float-triple vertices, three indices per triangle.
+- `hkpSimpleMeshShape` (m99, some objects): vertices at +24, 16-byte triangles at +36.
+- `hkpBoxShape`: half extents at +32 (m03_03's is flat).
+- `hkpSphereShape`: the convex radius is the sphere's.
+- `hkpCapsuleShape`: hemisphere centres at +32 and +48; the convex radius is the capsule's.
+- `hkpCylinderShape`: core radius at +20, end points at +32 and +48 (their w lanes hold the full
+  radius); the solid extends one convex radius past both.
+- `hkpConvexVerticesShape`: vertices in blocks of four at +64 (x, y, z lanes), count at +76.
+  The face planes at +80 are not read: many hulls store one face as several coplanar planes.
+  Returned as points, without the convex radius.
+- Wrappers: `hkpMoppBvTreeShape` (child at +52), `hkpConvexTranslateShape` (child at +24,
+  translation at +32) and `hkpConvexTransformShape` (child at +24, `hkTransform` at +32).
+- Not read: Havok 4.x files (29 object files, none placed in a retail map; 2 m99 map files).
+
+`hkTransform` stores its rotation as three columns, then the translation. Against the FLVER
+vertices of objects whose shapes are rotated 30–180°, reading the columns as rows fits worse
+(`o1616` 88% of vertices inside its box against 30%, `o6472` 53% against 14%). Every 5.x map and
+object file reads with no skipped shape.
+
+The storage-mesh and `hkpMoppBvTreeShape` offsets follow soulstruct-havok; soulstruct has no
+32-bit layouts for the other shapes, so theirs were read from the files. Mesh triangles are
+wound clockwise from the front, as stored ((c − a) × (b − a) points out; floors point down
+under the other order), which is also Godot's convention. The MOPP tree is ignored (Godot
+builds its own).
+
+`MapCollision` negates X like the FLVERs. Meshes swap each triangle's winding and become one
+`ConcavePolygonShape3D` per surface type, each `CollisionShape3D` carrying `surface_type`
+metadata. The other shapes become `BoxShape3D`, `SphereShape3D`, `CapsuleShape3D`,
+`CylinderShape3D` (both along the axis point to point) and `ConvexPolygonShape3D` (Godot builds
+the hull from the points), each rotation mirrored as S·R·S with S = diag(−1, 1, 1). Downward
+ray casts hit floors' front faces; the m03 hull is hit from outside only. Object bodies' bounds
+centres agree with their FLVERs for 98% of placements on m02 and m04 (the rest have no visible
+mesh), and primitive-only bodies enclose 60–100% of their rendered vertices on m02, m04 and m05
+(collision often covers part of an object, such as `o4421`'s top slab). The editor draws the
+shapes through the `CollisionShape3D` gizmo (View → Gizmos).
+
+**Surface types** (DS1's scheme: the last two digits are the base surface, +100/+200/+300 are
+variants of it). No DeS param names them; the names below come from the diffuse texture of the
+render geometry within 1 m of each collision triangle, over 15 main blocks:
+
+| Type | Nearest render textures | Reading |
+|---|---|---|
+| 1, 2 | walls, pillars, arches, blocks | stone |
+| 3 | cliffs, mud ground | soil, rock |
+| 4 (104, 204) | `etc_wood`, trees, wooden walkways | wood |
+| 5 | cloth, trees, ground | uncertain (DS1: grass) |
+| 9 (109, 209) | metal, chains, iron objects | metal |
+| 10 | `m01_sand*` | sand |
+| 14 | m05 wooden floors, walls and roofs | wood (m05) |
+| 16 | `m06_bone*` | bone |
+| 21 | water meshes, pool floors | water |
+| 22, 23 | m05 mud, garbage | mud, swamp |
+| 27 | `m06_ara_maguma`, iron stone | lava |
+
+Types 0, 6–8, 11, 12, 15, 18, 19, 25, 26, 40 and 90–92 match no clear texture. Some are
+mostly away from any render geometry, i.e. invisible surfaces: 40 (2 of 62 triangles near
+geometry), 7 (603 of 4,306), 0 (20,269 of 33,786).
 
 ## Draw parameters
 
@@ -670,9 +758,10 @@ applies to `AssetExtractor` and `FlverLoader`, which still do real I/O and decod
   restoration.
 
 **Data and systems**
-- Havok: collision meshes, skeletons and animation (an unmerged 2018 `SoulsFormatsNEXT`
-  branch has a DeS packfile reader and collision; `Grimrukh/soulstruct-havok` is a
-  DeS-specific Python reference, including the wavelet-compressed animation format).
+- Havok beyond static collision: skeletons, animation (the wavelet-compressed format), object
+  simulation (motion types, mass, constraints, ragdolls, breakable debris) and Havok 4.x files.
+  `Grimrukh/soulstruct-havok` is the DeS-specific reference; the unmerged 2018
+  `SoulsFormatsNEXT` branch is a rougher one.
 - Enemy/player placement, navmesh wiring, event scripts, `.breakobj` debris, cutscenes
   (`remo/scnAAxxxx.remobnd`: camera, Havok animation and `.tae` per cut).
 - Runtime-placed geometry: Nexus captures 094137/094221 draw a colonnade at a transform no
@@ -682,5 +771,6 @@ applies to `AssetExtractor` and `FlverLoader`, which still do real I/O and decod
 - A runtime (non-editor) loader for exported builds.
 
 **`SoulsFormatsNEXT` fork** (submodule; `origin` is the fork, `upstream` is `soulsmods`):
-local commits are the FLVER0 UV-scale fix, the `net8.0` retarget and the DeS `FFXDLSE` mode.
+local commits are the FLVER0 UV-scale fix, the `net8.0` retarget, the DeS `FFXDLSE` mode and
+the read-only Havok packfile reader (`Formats/HKX/`, new files only).
 Re-check the UV fix after any upstream sync.
