@@ -5,8 +5,9 @@ using SoulsFormats;
 
 namespace Archstone;
 
-// A MapPiece or Object with its draw-parameter IDs as stored in MSBD.Part. ToneMapID and
-// ToneCorrectID are carried but not bound per placement (those banks are frame-global).
+// A MapPiece, Object or Collision part with its draw-parameter IDs as stored in MSBD.Part.
+// ToneMapID and ToneCorrectID are carried but not bound per placement (those banks are
+// frame-global).
 public readonly record struct MsbPlacement(string ModelPath, string Name,
 	Vector3 Position, Vector3 RotationDegrees, Vector3 Scale, byte LightID, byte FogID,
 	byte ToneMapID, byte ToneCorrectID, byte ScatterID, int EntityID = -1);
@@ -62,6 +63,50 @@ public partial class MsbLoader : RefCounted
 			string flverPath = System.IO.Path.Combine(objRoot, modelName, "sib", modelName + ".flver");
 			if (System.IO.File.Exists(flverPath)) return flverPath;
 			GD.PushWarning($"MsbLoader: no .flver for object model '{modelName}' (expected '{flverPath}')");
+			return null;
+		});
+	}
+
+	// MSBD.Parts.Objects, resolved to obj/{id}/hkx/{id}.hkx; objects without one have no collision.
+	// obj/{id}/hkx/{id}_1.hkx, the broken state of a breakable object, is not placed.
+	public List<MsbPlacement> ReadObjectCollisions(string msbPath)
+	{
+		string realMsbPath = ProjectSettings.GlobalizePath(msbPath);
+		var msb = MSBD.Read(realMsbPath);
+		string objRoot = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(
+			System.IO.Path.GetDirectoryName(realMsbPath)))!, "obj");
+
+		return BuildPlacements(msb.Parts.Objects, modelName =>
+		{
+			string hkxPath = System.IO.Path.Combine(objRoot, modelName, "hkx", modelName + ".hkx");
+			return System.IO.File.Exists(hkxPath) ? hkxPath : null;
+		});
+	}
+
+	// MSBD.Parts.Collisions, resolved to map/{block}/{model}.hkx (case varies on disk). Collision
+	// parts name only the h-prefixed files; the l-prefixed ones are not placed.
+	public List<MsbPlacement> ReadCollisions(string msbPath)
+	{
+		string realMsbPath = ProjectSettings.GlobalizePath(msbPath);
+		var msb = MSBD.Read(realMsbPath);
+		string blockDir = System.IO.Path.Combine(
+			System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(realMsbPath))!,
+			System.IO.Path.GetFileNameWithoutExtension(realMsbPath));
+
+		var hkxByName = new Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
+		if (System.IO.Directory.Exists(blockDir))
+		{
+			foreach (var path in System.IO.Directory.GetFiles(blockDir))
+			{
+				if (path.EndsWith(".hkx", System.StringComparison.OrdinalIgnoreCase))
+					hkxByName.TryAdd(System.IO.Path.GetFileNameWithoutExtension(path), path);
+			}
+		}
+
+		return BuildPlacements(msb.Parts.Collisions, modelName =>
+		{
+			if (hkxByName.TryGetValue(modelName, out var hkxPath)) return hkxPath;
+			GD.PushWarning($"MsbLoader: no .hkx for collision model '{modelName}' in '{blockDir}'");
 			return null;
 		});
 	}
@@ -173,17 +218,17 @@ public partial class MsbLoader : RefCounted
 	}
 
 	private static List<MsbPlacement> BuildPlacements(
-		IEnumerable<MSBD.Part> parts, System.Func<string, string> resolveFlverPath)
+		IEnumerable<MSBD.Part> parts, System.Func<string, string> resolveModelPath)
 	{
 		var placements = new List<MsbPlacement>();
 		foreach (var part in parts)
 		{
-			string flverPath = resolveFlverPath(part.ModelName);
-			if (flverPath == null) continue;
+			string modelPath = resolveModelPath(part.ModelName);
+			if (modelPath == null) continue;
 
 			// System.Numerics vectors from SoulsFormats; mirroring happens in FlverLoader.
 			placements.Add(new MsbPlacement(
-				ProjectSettings.LocalizePath(flverPath),
+				ProjectSettings.LocalizePath(modelPath),
 				part.Name,
 				new Vector3(part.Position.X, part.Position.Y, part.Position.Z),
 				new Vector3(part.Rotation.X, part.Rotation.Y, part.Rotation.Z),

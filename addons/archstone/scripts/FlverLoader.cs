@@ -71,6 +71,8 @@ public partial class FlverLoader : RefCounted
 		foreach (var placement in _msbLoader.ReadObjects(msbPath))
 			root.AddChild(CollectCaster(InstantiatePlacement(placement, blockName, true), casters));
 		AttachShadowRenderer(root, blockName, casters);
+		root.AddChild(MapCollision.Build("Collision", _msbLoader.ReadCollisions(msbPath)));
+		root.AddChild(MapCollision.Build("ObjectCollision", _msbLoader.ReadObjectCollisions(msbPath)));
 		// Disabled until enabled in the inspector.
 		root.AddChild(new MapSfxPreview { Name = "MapSfxPreview", MapPath = msbPath });
 		return root;
@@ -189,15 +191,20 @@ public partial class FlverLoader : RefCounted
 		inst.Name = placement.Name;
 		inst.SetMeta("msb_entity_id", placement.EntityID);
 		inst.SetMeta("flver_path", placement.ModelPath);
-		// Mirrored: X negated, Y and Z angles negated. The engine composes Ry·Rz·Rx; every multi-axis
-		// object in the RPCS3 captures matches it to 1e-6 (docs/context.md, "Part rotation order").
-		inst.Position = new Vector3(-placement.Position.X, placement.Position.Y, placement.Position.Z);
-		var rot = placement.RotationDegrees;
-		inst.RotationOrder = EulerOrder.Yzx;
-		inst.RotationDegrees = new Vector3(rot.X, -rot.Y, -rot.Z);
-		inst.Scale = placement.Scale;
+		ApplyPartTransform(inst, placement);
 		ApplyDrawParams(inst, blockName, placement, receivesPointLights);
 		return inst;
+	}
+
+	// Mirrored: X negated, Y and Z angles negated. The engine composes Ry·Rz·Rx; every multi-axis
+	// object in the RPCS3 captures matches it to 1e-6 (docs/context.md, "Part rotation order").
+	internal static void ApplyPartTransform(Node3D node, MsbPlacement placement)
+	{
+		node.Position = new Vector3(-placement.Position.X, placement.Position.Y, placement.Position.Z);
+		var rot = placement.RotationDegrees;
+		node.RotationOrder = EulerOrder.Yzx;
+		node.RotationDegrees = new Vector3(rot.X, -rot.Y, -rot.Z);
+		node.Scale = placement.Scale;
 	}
 
 	// Binds this placement's LIGHT_BANK, LIGHT_SCATTERING_BANK and FOG_BANK rows (and point lights)
