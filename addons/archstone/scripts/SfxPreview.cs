@@ -40,10 +40,14 @@ public partial class SfxPreview : Node3D
         public SfxBatchParticles.NativeDirection Direction;
         public SfxBatchParticles.NativeFinite Finite;
         public SfxBatchParticles.NativeCarrier Carrier;
+        public SfxBatchParticles.NativeEmitterCurves Curves;
+        public SfxBatchParticles.NativeGravityCurve GravityCurve;
         public float CarrierExtent;
         // Constant container rotation (action34), degrees/s, about SpinPivot.
         public Vector3 Spin;
         public Transform3D SpinPivot;
+        // Under an action46 container: Placement is in native camera space and follows the camera.
+        public bool CameraAttached;
 
         public Layer CopyForPlacement()
         {
@@ -97,6 +101,8 @@ public partial class SfxPreview : Node3D
     // Outermost constant container rotation in scope and the placement it pivots about.
     private Vector3 _spin;
     private Transform3D _spinPivot = Transform3D.Identity;
+    // Inside an action46 (MoveCamera) container.
+    private bool _cameraAttach;
     // Enclosing template2101 startup delay and destroy time (after that delay), for its children.
     private double _containerDelay, _containerLife = double.PositiveInfinity;
     private const int MaxNodes = 100000;
@@ -128,7 +134,7 @@ public partial class SfxPreview : Node3D
         set
         {
             _blend = Math.Clamp(value, -1, 2);
-            foreach (var l in _layers) l.Material.Shader = PreviewShader(_blend < 0 ? AutomaticBlend(l.NativeTransparency) : _blend);
+            foreach (var l in _layers.Where(l => l.EmitterId != 43)) l.Material.Shader = PreviewShader(_blend < 0 ? AutomaticBlend(l.NativeTransparency) : _blend);
         }
     }
     private Vector3 _previewWindAcceleration;
@@ -202,15 +208,18 @@ public partial class SfxPreview : Node3D
         };
         var scale = (CurveXyzTexture)p.ScaleCurve;
         float sprite = new Vector2(scale.CurveX.MaxValue, scale.CurveY.MaxValue).Length() * 0.5f;
-        if (l.Emit32 != null)
+        if (l.Curves != null)
+            sprite *= l.Curves.Scale.Max(v => new[] { v.X, v.Y, v.Z, v.W }.Max(Math.Abs));
+        else if (l.Emit32 != null)
             sprite *= new[] { l.Emit32.X.X, l.Emit32.X.Y, l.Emit32.Y.X, l.Emit32.Y.Y }.Max(Math.Abs);
         float motion84 = l.Motion84 == null ? 0 : Math.Abs(l.Motion84.Gravity) * life * life * 0.5f
             + Math.Abs(l.Motion84.Wind) * l.WindPreview * life;
         // A rotating container can swing the layer origin anywhere on its pivot sphere.
         float origin = l.Spin == Vector3.Zero ? l.Placement.Origin.Length()
             : l.SpinPivot.Origin.Length() + (l.SpinPivot.AffineInverse() * l.Placement).Origin.Length();
+        float gravity = p.Gravity.Length() + (l.GravityCurve == null ? 0 : Math.Abs(l.GravityCurve.At(life).V / life));
         return origin + l.CarrierExtent + extent + sprite + p.InitialVelocityMax * life
-            + p.Gravity.Length() * life * life * 0.5f + motion84;
+            + gravity * life * life * 0.5f + motion84;
     }
     public double PreviewAge => _age;
 
@@ -291,6 +300,7 @@ public partial class SfxPreview : Node3D
                 }
                 else if (f.EffectID == 2023)
                 {
+                    var parent = _parentPlacement;
                     try
                     {
                         if (args.Count != 17 || args[0] is not FFXDLSE.Param32 { ActionID: 71 } setup ||
@@ -310,11 +320,14 @@ public partial class SfxPreview : Node3D
                         AddLayer(setup.ParamList.Params, emitter, placement.ActionID == 35 ? placement.ParamList.Params : null,
                             motion.ActionID == 55 ? motion.ParamList.Params : null, motion.ActionID == 84 ? motion.ParamList.Params : null,
                             childPath, templates + 1, texture);
-                        // Startup action16 is a child creator, not another emission recipe.
+                        // Startup action16 is a child creator, not another emission recipe. Its
+                        // children start at the instance's pose, placement included (fog-gate
+                        // distortions sit at the emitter's height).
+                        _parentPlacement *= PlacementAction(placement);
                         Visit(new List<P> { args[16] }, childPath + ":startup", depth + 1, templates + 1, texture);
                     }
                     catch (Exception e) { Note($"SKIPPED {childPath}: {e.Message}"); }
-                    finally { _schedule = null; }
+                    finally { _schedule = null; _parentPlacement = parent; }
                 }
                 else if (f.EffectID == 2101)
                 {
@@ -322,8 +335,9 @@ public partial class SfxPreview : Node3D
                     // action 3 and startup child 8; destroyed after lifetime 4 when >= 0.
                     if (args.Count != 9) { Note($"SKIPPED {childPath}: malformed geometry container."); continue; }
                     bool child = args[8] is FFXDLSE.Param32 { ActionID: not (0 or 17) };
-                    string geometry = args[0] is FFXDLSE.Param32 { ActionID: not 0 } g ? $"geometry primitive action{g.ActionID}" : null;
-                    if (!child)
+                    var primitive = args[0] as FFXDLSE.Param32 is { ActionID: 20 or 43 } q ? q : null;
+                    string geometry = primitive == null && args[0] is FFXDLSE.Param32 { ActionID: not 0 } g ? $"geometry primitive action{g.ActionID}" : null;
+                    if (!child && primitive == null)
                     {
                         Note(geometry != null ? $"Omitted {childPath}: {geometry} is not implemented and the container has no billboard child."
                             : $"{childPath}: empty geometry container (no geometry, no child).");
@@ -332,7 +346,7 @@ public partial class SfxPreview : Node3D
                     if (args[3] is not FFXDLSE.Param32 { ActionID: 0 } || IsCurve(args[4]) || IsCurve(args[7]))
                     { Note($"SKIPPED {childPath}: geometry-container extra action or dynamic lifetime."); continue; }
                     var parent = _parentPlacement;
-                    var spin = (_spin, _spinPivot);
+                    var spin = (_spin, _spinPivot, _cameraAttach);
                     var lifecycle = (_containerDelay, _containerLife);
                     try
                     {
@@ -344,10 +358,16 @@ public partial class SfxPreview : Node3D
                         _parentPlacement *= PlacementAction(args[2]);
                         ApplyMotion(args[1], childPath);
                         if (geometry != null) Note($"Template2101 {geometry} is omitted; only its startup billboard child is supported.");
-                        Visit(new List<P> { args[8] }, childPath + ":startup", depth + 1, templates + 1, texture);
+                        try
+                        {
+                            if (primitive?.ActionID == 20) AddBillboard(primitive.ParamList.Params, childPath + ":action20", texture);
+                            if (primitive?.ActionID == 43) AddDistortion(primitive.ParamList.Params, childPath + ":action43", texture);
+                        }
+                        catch (NotSupportedException e) { Note($"SKIPPED {childPath}:action{primitive.ActionID}: {e.Message}"); }
+                        if (child) Visit(new List<P> { args[8] }, childPath + ":startup", depth + 1, templates + 1, texture);
                     }
                     catch (NotSupportedException e) { Note($"SKIPPED {childPath}: {e.Message}"); }
-                    finally { _parentPlacement = parent; (_spin, _spinPivot) = spin; (_containerDelay, _containerLife) = lifecycle; }
+                    finally { _parentPlacement = parent; (_spin, _spinPivot, _cameraAttach) = spin; (_containerDelay, _containerLife) = lifecycle; }
                 }
                 else if (f.EffectID is 2121 or 2123)
                 {
@@ -357,7 +377,7 @@ public partial class SfxPreview : Node3D
                     // Both containers apply their placement, then their motion, then create children:
                     // 2121 placement 9, motion 8, children 0-7; 2123 placement 2, motion 1, child 0.
                     var parent = _parentPlacement;
-                    var spin = (_spin, _spinPivot);
+                    var spin = (_spin, _spinPivot, _cameraAttach);
                     try
                     {
                         _parentPlacement *= PlacementAction(args[f.EffectID == 2121 ? 9 : 2]);
@@ -366,7 +386,7 @@ public partial class SfxPreview : Node3D
                         else Visit(new List<P> { args[0] }, childPath + ":create", depth + 1, templates + 1, texture);
                     }
                     catch (NotSupportedException e) { Note($"SKIPPED {childPath}: {e.Message}"); }
-                    finally { _parentPlacement = parent; (_spin, _spinPivot) = spin; }
+                    finally { _parentPlacement = parent; (_spin, _spinPivot, _cameraAttach) = spin; }
                 }
                 else if (f.EffectID == 2020)
                 {
@@ -432,11 +452,19 @@ public partial class SfxPreview : Node3D
         var e = emitter.ParamList.Params;
         int speedIndex = emitter.ActionID == 28 ? 3 : emitter.ActionID == 32 ? 6 : 4;
         SfxBatchParticles.NativeEmit32 emit32 = null;
+        // Speed and size-multiplier sequences may vary over the emitter's life; they are sampled
+        // per emission. Other emitter and motion sequences (shape, direction, colour, drag) must
+        // be constant.
+        int[] sizeArgs = emitter.ActionID == 32 ? new[] { 8, 9, 10, 11 } : new[] { speedIndex + 2, speedIndex + 3, speedIndex + 4, speedIndex + 5 };
+        var sampled = new[] { speedIndex, speedIndex + 1 }.Concat(sizeArgs).ToArray();
+        if (e.Where((p, k) => !sampled.Contains(k)).Any(IsCurve) || (motion?.Skip(1).Any(IsCurve) ?? false))
+            throw new NotSupportedException("Dynamic emitter shape/direction/colour or motion drag.");
+        var curves = sampled.Any(k => IsCurve(e[k])) ? EmitterCurves(e, speedIndex, sizeArgs, emitter.ActionID == 32) : null;
+        var gravityCurve = motion != null && IsCurve(motion[0]) ? GravityCurve(motion[0]) : null;
         if (emitter.ActionID == 32)
         {
             // Native Emit32 draws each particle's X/Y size multiplier from base ± range (10.3),
             // so the base multiplier leaves the shared size curve.
-            if (e.Skip(8).Take(4).Any(IsCurve)) throw new NotSupportedException("Dynamic Emit32 size range.");
             float x = Value(e[8], 0), xr = Value(e[9], 0), y = Value(e[10], 0), yr = Value(e[11], 0);
             emit32 = new SfxBatchParticles.NativeEmit32(new Vector2(x - xr, x + xr), new Vector2(y - yr, y + yr),
                 Integer(e[14]) != 0, Integer(e[13]) != 0);
@@ -444,8 +472,8 @@ public partial class SfxPreview : Node3D
         var process = new ParticleProcessMaterial {
             Gravity = Vector3.Zero, Direction = Vector3.Up, ScaleMin = 1, ScaleMax = 1,
             ScaleCurve = new CurveXyzTexture {
-                CurveX = Curve(t => Value(setup[10], t) * (emit32 != null ? 1 : Value(e[speedIndex + 2], 0)), span),
-                CurveY = Curve(t => Value(setup[11], t) * (emit32 != null ? 1 : Value(e[speedIndex + 4], 0)), span),
+                CurveX = Curve(t => Value(setup[10], t) * (emit32 != null || curves != null ? 1 : Value(e[speedIndex + 2], 0)), span),
+                CurveY = Curve(t => Value(setup[11], t) * (emit32 != null || curves != null ? 1 : Value(e[speedIndex + 4], 0)), span),
                 CurveZ = Curve(_ => 1, span) },
             Color = ColorValue(e[speedIndex + 6], 0), ColorRamp = ColorRamp(setup[12], span),
             AngleMin = -Value(setup[13], 0) - Math.Abs(Value(setup[14], 0)),
@@ -453,19 +481,7 @@ public partial class SfxPreview : Node3D
             AngularVelocityMin = 1, AngularVelocityMax = 1,
             AngularVelocityCurve = new CurveTexture { Curve = Curve(t => -Value(setup[15], t), span) }
         };
-        // Keep sampled frame numbers in their own texture: Godot's animation-speed parameter
-        // isn't equivalent to an authored discrete frame sequence.
-        var material = new ShaderMaterial { Shader = PreviewShader(_blend < 0 ? AutomaticBlend(transparency) : _blend) };
-        material.SetShaderParameter("diffuse_tex", tex);
-        material.SetShaderParameter("frame_curve", FrameTexture(setup[9], span, frames));
-        material.SetShaderParameter("frame_columns", columns);
-        material.SetShaderParameter("frame_count", frames);
-        // Setup71's shader type: bump absent/present x volume flag (arg22) unset/set gives
-        // Type0/1/2/3 (research 10.8). Type2 intersects scene depth (10.9-10.11); Type0 alone
-        // applies exposure.
-        bool bumpAbsent = setup[2] is FFXDLSE.Param34 { TextureID: 0 }, volume = Integer(setup[22]) != 0;
-        material.SetShaderParameter("volume_depth", bumpAbsent && volume);
-        material.SetShaderParameter("apply_exposure", bumpAbsent && !volume);
+        var material = SpriteMaterial(tex, transparency, setup[9], span, columns, frames, setup[2], Integer(setup[22]) != 0);
         var quad = new QuadMesh { Size = Vector2.One, Material = material };
         var transform = _parentPlacement * PlacementTransform(placement);
         SfxBatchParticles.NativeCarrier carrier = null;
@@ -486,7 +502,8 @@ public partial class SfxPreview : Node3D
             Motion = motion, Material = material, NativeTransparency = transparency,
             Placement = transform, Life = life, Capacity = capacity, Batch = batch, Interval = interval, Delay = delay,
             MinDistance = _minDistance, MaxDistance = _maxDistance, Local = Integer(setup[17]) != 0, Mesh = quad,
-            Finite = finite, Carrier = carrier, CarrierExtent = _carrierContext?.Extent ?? 0, Spin = _spin, SpinPivot = _spinPivot };
+            Finite = finite, Carrier = carrier, CarrierExtent = _carrierContext?.Extent ?? 0, Spin = _spin, SpinPivot = _spinPivot,
+            CameraAttached = _cameraAttach, Curves = curves, GravityCurve = gravityCurve };
         if (finite != null) Note($"Finite template2023: {(finite.Emissions < 0 ? "unlimited" : finite.Emissions)} emission(s), " +
             $"emitter lifespan {(finite.EmitterLife < 0 ? "unlimited" : $"{finite.EmitterLife:0.###}s")}, " +
             $"effect lifetime {(finite.EffectLife < 0 ? "unlimited" : $"{finite.EffectLife:0.###}s")}" +
@@ -499,7 +516,8 @@ public partial class SfxPreview : Node3D
             $"linear drag {layer.Motion84.Drag}, velocity perturbation ±{layer.Motion84.AngleDegrees}° every {layer.Motion84.Interval} updates. " +
             $"Update cadence uses ZeroWaitPreviewHz and PreviewWindAcceleration is applied as wind velocity ×{layer.Motion84.Wind}; " +
             "native cadence and live map wind remain unrecovered.");
-        if (e.Concat(motion ?? new List<P>()).Any(IsCurve)) throw new NotSupportedException("Dynamic emitter/motion curves require scheduled sampling support.");
+        if (curves != null) Note($"Emitter speed/size sequences at {path} are sampled per emission on the instance clock (size ranges of action{emitter.ActionID} {(emitter.ActionID == 32 ? "drawn" : "omitted")}).");
+        if (gravityCurve != null) Note($"Action55 gravity sequence at {path} is evaluated on the instance clock, as motion84's (inferred for action55).");
         layer.Appearance = new SfxBatchParticles.Appearance(process, span);
         _layers.Add(layer);
         CoverageRadius = Math.Max(CoverageRadius, Coverage(layer));
@@ -507,6 +525,103 @@ public partial class SfxPreview : Node3D
             $"lifetime {life}; batch {batch} / {interval:F6}s; capacity {capacity}; delay {delay}. " +
             "Unimplemented: bump, random spin flag, fog/light/blur, volume/output (atmosphere, Type2 near-plane branch), sphere (action31) birth direction" +
             (emit32 != null ? "." : " and scale randomness/linkage."));
+    }
+
+    private ShaderMaterial SpriteMaterial(Texture2D tex, int transparency, P frameSeq, float span, int columns, int frames, P bump, bool volume)
+    {
+        // Keep sampled frame numbers in their own texture: Godot's animation-speed parameter
+        // isn't equivalent to an authored discrete frame sequence.
+        var material = new ShaderMaterial { Shader = PreviewShader(_blend < 0 ? AutomaticBlend(transparency) : _blend) };
+        material.SetShaderParameter("diffuse_tex", tex);
+        material.SetShaderParameter("frame_curve", FrameTexture(frameSeq, span, frames));
+        material.SetShaderParameter("frame_columns", columns);
+        material.SetShaderParameter("frame_count", frames);
+        // Setup71's shader type: bump absent/present x volume flag (arg22) unset/set gives
+        // Type0/1/2/3 (research 10.8). Type2 intersects scene depth (10.9-10.11); Type0 alone
+        // applies exposure.
+        bool bumpAbsent = bump is FFXDLSE.Param34 { TextureID: 0 };
+        material.SetShaderParameter("volume_depth", bumpAbsent && volume);
+        material.SetShaderParameter("apply_exposure", bumpAbsent && !volume);
+        return material;
+    }
+
+    // Action20 (AssignBillboard): one sprite at the container's pose for the container's life.
+    // Arguments: texture, scaleY, scaleX, yAxisRotation, transparency, colour, atlas columns,
+    // frames, frame, bump, fog, light, volume, and a 14th sequence (0 in every corpus use). It
+    // shares the cluster renderer (host AssignBillboard builds the same render descriptor), so
+    // it plays as a one-sprite cluster; full-extent sizes and base scale (1, 1) as there. The
+    // scaleY-before-scaleX order is the archived Lua's.
+    private void AddBillboard(List<P> a, string path, Func<int, Texture2D> texture)
+    {
+        if (a.Count is not (13 or 14)) throw new NotSupportedException($"Action20 arity {a.Count}.");
+        if (a[0] is not FFXDLSE.Param34 resource) throw new NotSupportedException("Bound/dynamic billboard texture ID.");
+        if (Integer(a[3]) != 0) throw new NotSupportedException("Y-axis-constrained billboarding not implemented.");
+        if (a.Count == 14 && (IsCurve(a[13]) || Value(a[13], 0) != 0)) Note($"Action20 at {path}: nonzero 14th argument (unrecovered) ignored.");
+        int columns = Integer(a[6]), frames = Integer(a[7]);
+        if (columns < 1 || columns > 256 || frames < 1 || frames > 4096) throw new InvalidDataException("Invalid atlas dimensions.");
+        float span = QuadSpan();
+        var material = SpriteMaterial(texture(resource.TextureID), Integer(a[4]), a[8], span, columns, frames, a[9], Integer(a[12]) != 0);
+        AddQuadLayer(material, a[2], a[1], a[5], Integer(a[4]), 20, path, $"action20 billboard; texture {resource.TextureID}");
+    }
+
+    // Action43 (SetPostEffect): type, shape, pointToCamera, random scale X/Y/Z, scale X/Y/Z,
+    // strength, wave number, wave speed, bump scroll U/V, bump, light, colour, transparency,
+    // mask, 19th and 20th arguments. Type 1 is the bump distortion (Type1, Type5 with a mask);
+    // sfx_distortion.gdshader has the recovered program. Type 0 (radial wave) and nonzero shapes
+    // are not implemented; a random scale above 1 (none on maps) is omitted.
+    private void AddDistortion(List<P> a, string path, Func<int, Texture2D> texture)
+    {
+        if (a.Count != 21) throw new NotSupportedException($"Action43 arity {a.Count}.");
+        if (Integer(a[0]) != 1) throw new NotSupportedException($"Distortion type {Integer(a[0])} (radial wave) not implemented.");
+        if (Integer(a[1]) != 0) throw new NotSupportedException($"Distortion shape {Integer(a[1])} not implemented.");
+        if (a[14] is not FFXDLSE.Param34 { TextureID: not 0 } bump || a[18] is not FFXDLSE.Param34 mask)
+            throw new NotSupportedException("Bound/absent distortion textures.");
+        if (new[] { 9, 12, 13 }.Any(k => IsCurve(a[k]))) throw new NotSupportedException("Dynamic distortion strength/scroll.");
+        if (new[] { 3, 4, 5 }.Any(k => Value(a[k], 0) != 1)) Note($"Action43 at {path}: random scale omitted.");
+        // Its alpha is >= colour.a, so an opaque colour replaces what lies behind with the scene
+        // copy. Godot's copy holds only opaque geometry, so it draws before every other
+        // transparent surface; drawn after them, it cut the fog out of fog gates.
+        var material = new ShaderMaterial { Shader = GD.Load<Shader>("res://addons/archstone/shaders/sfx_distortion.gdshader"),
+            RenderPriority = (int)Material.RenderPriorityMin };
+        material.SetShaderParameter("bump_tex", texture(bump.TextureID));
+        if (mask.TextureID != 0) material.SetShaderParameter("mask_tex", texture(mask.TextureID));
+        material.SetShaderParameter("use_mask", mask.TextureID != 0);
+        material.SetShaderParameter("point_to_camera", Integer(a[2]) != 0);
+        material.SetShaderParameter("strength", Value(a[9], 0));
+        material.SetShaderParameter("scroll", new Vector2(Value(a[12], 0), Value(a[13], 0)));
+        AddQuadLayer(material, a[6], a[7], a[16], -1, 43, path, $"action43 distortion; bump {bump.TextureID}; mask {mask.TextureID}");
+    }
+
+    private float QuadSpan()
+    {
+        if (_containerLife <= 0) throw new NotSupportedException("Destroyed before it is drawn.");
+        return (float)Math.Min(_containerLife, 60);
+    }
+
+    // One quad at the container's pose for the container's life, as a one-particle layer whose
+    // size and colour curves run on its age (the container's).
+    private void AddQuadLayer(ShaderMaterial material, P scaleX, P scaleY, P colour, int transparency, int action, string path, string description)
+    {
+        if (_carrierContext != null) throw new NotSupportedException("Primitive in an emitted child instance.");
+        if (_layers.Count >= MaxLayers) throw new InvalidDataException("Layer descriptor budget exceeded.");
+        double life = _containerLife;
+        float span = QuadSpan();
+        var process = new ParticleProcessMaterial {
+            Gravity = Vector3.Zero, ScaleMin = 1, ScaleMax = 1,
+            ScaleCurve = new CurveXyzTexture { CurveX = Curve(t => Value(scaleX, t), span), CurveY = Curve(t => Value(scaleY, t), span), CurveZ = Curve(_ => 1, span) },
+            ColorRamp = ColorRamp(colour, span), AngularVelocityCurve = new CurveTexture { Curve = Curve(_ => 0, span) }
+        };
+        var layer = new Layer { Process = process, EmitterId = action, Material = material, NativeTransparency = transparency,
+            Placement = _parentPlacement, Life = double.IsFinite(life) ? (float)life : SfxBatchParticles.PermanentLife,
+            Capacity = 1, Batch = 1, Interval = 1, Delay = _containerDelay, MinDistance = _minDistance, MaxDistance = _maxDistance,
+            Local = true, Mesh = new QuadMesh { Size = Vector2.One, Material = material }, Finite = new(1, -1, -1),
+            Spin = _spin, SpinPivot = _spinPivot, CameraAttached = _cameraAttach };
+        if (layer.Life < 0.01f || layer.Delay > 60) throw new NotSupportedException("Primitive life/delay outside preview range.");
+        layer.Appearance = new SfxBatchParticles.Appearance(process, span);
+        _layers.Add(layer);
+        CoverageRadius = Math.Max(CoverageRadius, Coverage(layer));
+        Note($"LAYER {_layers.Count - 1}: {path}; {description}; distance [{_minDistance}, {_maxDistance}); " +
+            $"life {(double.IsFinite(life) ? $"{life:0.###}s" : "container")}; delay {layer.Delay}.");
     }
 
     // Compiled action35 (ELF_ENGINE_ACCURACY_RESEARCH.md 9.2/9.6), which the game dispatches
@@ -523,6 +638,46 @@ public partial class SfxPreview : Node3D
         if (result.Interval is < 1 or > 10000 || Math.Abs(result.AngleDegrees) > 360 || Math.Abs(result.Wind) > 100)
             throw new NotSupportedException("Motion84 outside bounded preview range.");
         return result;
+    }
+
+    private const int CurveSamples = 65;
+
+    private static float LastTick(P p) => p switch {
+        FFXDLSE.Param9 v => v.TickFloats[^1].Tick, FFXDLSE.Param11 v => v.TickFloats[^1].Tick, _ => 0 };
+
+    // Per-emission tables over the curves' keyed span (values hold after it). Sizes of 28-31 keep
+    // the base multiplier only, as the constant path does; Emit32 draws base ± range.
+    private static SfxBatchParticles.NativeEmitterCurves EmitterCurves(List<P> e, int speed, int[] size, bool emit32)
+    {
+        float span = Math.Max(1f / 60, new[] { speed, speed + 1 }.Concat(size).Max(k => LastTick(e[k])));
+        if (span > 600) throw new NotSupportedException("Emitter sequence span outside preview range.");
+        var speeds = new Vector2[CurveSamples]; var sizes = new Vector4[CurveSamples];
+        for (int i = 0; i < CurveSamples; i++)
+        {
+            float t = span * i / (CurveSamples - 1), v = Value(e[speed], t), r = Math.Abs(Value(e[speed + 1], t));
+            speeds[i] = new Vector2(Math.Max(0, v - r), Math.Max(0, v + r));
+            float x = Value(e[size[0]], t), y = Value(e[size[2]], t);
+            float xr = emit32 ? Value(e[size[1]], t) : 0, yr = emit32 ? Value(e[size[3]], t) : 0;
+            sizes[i] = new Vector4(x - xr, x + xr, y - yr, y + yr);
+        }
+        return new(span, speeds, sizes);
+    }
+
+    // Trapezoid integrals of the gravity scalar over its keyed span.
+    private static SfxBatchParticles.NativeGravityCurve GravityCurve(P gravity)
+    {
+        float span = Math.Max(1f / 60, LastTick(gravity));
+        if (span > 600) throw new NotSupportedException("Gravity sequence span outside preview range.");
+        var g1 = new float[CurveSamples]; var g2 = new float[CurveSamples];
+        float dt = span / (CurveSamples - 1), previous = Value(gravity, 0);
+        for (int i = 1; i < CurveSamples; i++)
+        {
+            float g = Value(gravity, dt * i);
+            g1[i] = g1[i - 1] + 0.5f * (previous + g) * dt;
+            g2[i] = g2[i - 1] + 0.5f * (g1[i - 1] + g1[i]) * dt;
+            previous = g;
+        }
+        return new(span, g1, g2, previous);
     }
 
     // Runtime argument slot 0, which template2023 binds to capacity (setup) and batch (emission).
@@ -564,6 +719,16 @@ public partial class SfxPreview : Node3D
     {
         if (p is not FFXDLSE.Param32 { ActionID: not 0 } motion) return;
         if (motion.ActionID == 75) return; // AssignSound: audio only
+        if (motion.ActionID == 46)
+        {
+            // MoveCamera (ELF_ENGINE_ACCURACY_RESEARCH.md 18): the container leaves its parent and
+            // rides the camera, its local pose read in camera space. Argument 0 selects position
+            // and rotation (1, every corpus use) or position only (0, treated as 1 here).
+            if (_carrierContext != null || _spin != Vector3.Zero) { Note($"Camera-attached container at {path} inside an emitted or rotating container is not implemented."); return; }
+            _cameraAttach = true;
+            Note($"Container motion action46 at {path}: children follow the camera (native camera +Z forward inferred).");
+            return;
+        }
         if (motion.ActionID != 34) { Note($"Container motion action{motion.ActionID} at {path} is not implemented; children stay at the container's placed pose."); return; }
         var a = motion.ParamList.Params;
         if (a.Count != 3 || a.Any(IsCurve)) { Note($"Dynamic container rotation at {path} is not implemented."); return; }
@@ -573,6 +738,7 @@ public partial class SfxPreview : Node3D
         if (speed == Vector3.Zero) return;
         if (_spin != Vector3.Zero) { Note($"Nested container rotation at {path} ignored; the outer rotation is kept."); return; }
         if (_carrierContext != null) { Note($"Rotation of emitted child instances at {path} is not implemented."); return; }
+        if (_cameraAttach) { Note($"Container rotation at {path} inside a camera-attached container is not implemented."); return; }
         _spin = speed; _spinPivot = _parentPlacement;
         Note($"Container rotation at {path}: yaw/pitch/roll {speed.X}/{speed.Y}/{speed.Z} deg/s (axis mapping inferred from names).");
     }
@@ -712,7 +878,7 @@ public partial class SfxPreview : Node3D
         int speed = layer.EmitterId == 28 ? 3 : layer.EmitterId == 32 ? 6 : 4;
         float velocity = Value(e[speed], time), range = Math.Abs(Value(e[speed + 1], time));
         p.InitialVelocityMin = Math.Max(0, velocity - range);
-        p.InitialVelocityMax = Math.Max(0, velocity + range);
+        p.InitialVelocityMax = layer.Curves == null ? Math.Max(0, velocity + range) : layer.Curves.Speed.Max(v => v.Y);
         // Breadth and concentration precede speed in every billboard emitter. emissionType
         // (28: arg10, 29/30: arg11; 31/32 pass 0) picks the velocity frame natively:
         // 0 the emitter frame, 1/2 world +Z turned onto +Y/-Y, 3 world axes (research 11).
@@ -754,7 +920,7 @@ public partial class SfxPreview : Node3D
             // Gravity is treated as a downward scalar: the negative inputs on rising smoke
             // and fire imply upward acceleration. This is a documented preview inference,
             // not a recovered native integration equation. Wind is supplied explicitly.
-            p.Gravity = new Vector3(0, -Value(layer.Motion[0], time), 0);
+            p.Gravity = layer.GravityCurve != null ? Vector3.Zero : new Vector3(0, -Value(layer.Motion[0], time), 0);
             p.DampingMin = p.DampingMax = Math.Max(0, Value(layer.Motion[1], time));
         }
     }
@@ -769,12 +935,13 @@ public partial class SfxPreview : Node3D
         {
             if (!Selected(l, _viewDistance)) continue;
             if (l.Particles != null) { l.Particles.Emitting = true; continue; }
-            var particles = new SfxBatchParticles { Name = $"Billboards_{_layers.IndexOf(l)}", Transform = l.Placement };
+            var particles = new SfxBatchParticles { Name = $"Billboards_{_layers.IndexOf(l)}",
+                Transform = l.CameraAttached ? CameraLayerTransform(l, ViewCamera()) : l.Placement };
             try
             {
                 particles.Configure(l.Process, l.Mesh, l.Life, l.Capacity, l.Batch, l.Interval, l.Delay,
                     (uint)(_layers.IndexOf(l) + 1) + PlacementSeed, l.Local, ZeroWaitPreviewHz, l.Appearance,
-                    l.Emit32, l.Motion84, _previewWindAcceleration, l.Finite, l.Carrier, l.Direction);
+                    l.Emit32, l.Motion84, _previewWindAcceleration, l.Finite, l.Carrier, l.Direction, l.Curves, l.GravityCurve);
                 AddChild(particles);
                 l.Particles = particles;
                 UpdateSpin(l);
@@ -796,17 +963,38 @@ public partial class SfxPreview : Node3D
         if (FollowCamera && (_lodRefresh -= delta) <= 0)
         {
             _lodRefresh = 0.25;
-            Camera3D camera = GetViewport().GetCamera3D();
-#if TOOLS
-            if (Engine.IsEditorHint()) camera = EditorInterface.Singleton.GetEditorViewport3D(EditorViewportIndex).GetCamera3D();
-#endif
+            var camera = ViewCamera();
             if (camera != null) SetViewDistance(camera.GlobalPosition.DistanceTo(GlobalPosition));
         }
+        var view = CameraAttached ? ViewCamera() : null;
         foreach (var l in _layers)
         {
-            UpdateSpin(l);
+            if (l.CameraAttached) { if (l.Particles != null) l.Particles.Transform = CameraLayerTransform(l, view); }
+            else UpdateSpin(l);
             l.Particles?.Advance(delta);
         }
+    }
+
+    public bool CameraAttached => _layers.Any(l => l.CameraAttached);
+
+    private Camera3D ViewCamera()
+    {
+        if (!IsInsideTree()) return null;
+#if TOOLS
+        if (Engine.IsEditorHint()) return EditorInterface.Singleton.GetEditorViewport3D(EditorViewportIndex).GetCamera3D();
+#endif
+        return GetViewport().GetCamera3D();
+    }
+
+    // Native camera axes in Godot after the raw-X mirror: X and Z turn (a proper rotation), so a
+    // native camera-space +Z offset lands ahead of the view.
+    private static readonly Basis NativeCameraAxes = Basis.FromScale(new Vector3(-1, 1, -1));
+
+    private Transform3D CameraLayerTransform(Layer l, Camera3D camera)
+    {
+        if (camera == null || !IsInsideTree() || !camera.IsInsideTree()) return l.Particles?.Transform ?? l.Placement;
+        var frame = new Transform3D(camera.GlobalBasis.Orthonormalized() * NativeCameraAxes, camera.GlobalPosition);
+        return GlobalTransform.AffineInverse() * frame * l.Placement;
     }
 
     // Map eviction hides and pauses instead of freeing: in the editor, every node added or

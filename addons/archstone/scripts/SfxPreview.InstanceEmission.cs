@@ -182,7 +182,7 @@ public partial class SfxPreview
         if (instances is < 1 or > 64 || delay is < 0 or > 60 || interval is < 0 or > 60)
             throw new NotSupportedException($"Template2020 schedule outside bounded playback: instances={instances}, delay={delay}, interval={interval}.");
         var parent = _parentPlacement;
-        var spin = (_spin, _spinPivot);
+        var spin = (_spin, _spinPivot, _cameraAttach);
         try
         {
             _parentPlacement *= PlacementAction(args[3]);
@@ -193,6 +193,6 @@ public partial class SfxPreview
                  $"{(life >= 0 ? $", for {life:0.###}s" : "")}. Child orientation beyond zero tilt, and each child's own capacity limit, are approximations.");
             Visit(new List<P> { args[0] }, path + ":particle", depth + 1, templates + 1, texture);
         }
-        finally { _parentPlacement = parent; (_spin, _spinPivot) = spin; _carrierContext = null; }
+        finally { _parentPlacement = parent; (_spin, _spinPivot, _cameraAttach) = spin; _carrierContext = null; }
     }
 }

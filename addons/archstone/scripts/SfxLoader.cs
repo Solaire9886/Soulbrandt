@@ -47,16 +47,14 @@ public partial class SfxLoader : RefCounted
             if (effectId < 0 || previewAmount < 1 || previewAmount > 256 || blendMode < -1 || blendMode > 2)
                 throw new ArgumentOutOfRangeException(nameof(effectId), "Invalid ID, amount (1–256), or preview blend (-1–2).");
             var dir = Path.GetFullPath(ProjectSettings.GlobalizePath(bankDir));
-            var resolvedDir = dir;
-            var path = Path.Combine(dir, EffectFileName(effectId));
-            if (!File.Exists(path))
-            {
-                resolvedDir = Path.Combine(Path.GetDirectoryName(dir)!, "ds_sfxbnd_commoneffects");
-                path = Path.Combine(resolvedDir, EffectFileName(effectId));
-            }
+            // The map's bank, then the resident banks: common effects, then main (m08 places some).
+            var resolvedDir = new[] { dir, "ds_sfxbnd_commoneffects", "ds_sfxbnd_main" }
+                .Select(d => Path.Combine(Path.GetDirectoryName(dir)!, d))
+                .FirstOrDefault(d => File.Exists(Path.Combine(d, EffectFileName(effectId)))) ?? dir;
+            var path = Path.Combine(resolvedDir, EffectFileName(effectId));
             var info = new FileInfo(path);
             if (!info.Exists || info.Length > MaxEntryBytes || info.Length < 4)
-                throw new FileNotFoundException($"Effect {effectId} not found in selected bank or commoneffects.");
+                throw new FileNotFoundException($"Effect {effectId} not found in selected bank, commoneffects or main.");
             var bytes = File.ReadAllBytes(path);
             if (System.Text.Encoding.ASCII.GetString(bytes, 0, 4) != "DLSE")
                 throw new NotSupportedException("Only DeS DLSE effects are supported by this preview.");
@@ -123,6 +121,13 @@ public partial class SfxLoader : RefCounted
             long estimate = checked((long)width * height * 4 * 4 / 3);
             if (_textureBytes + estimate > 64 * 1024 * 1024)
                 throw new InvalidDataException("SFX texture cache budget exceeded.");
+            if (tpf.Textures[0].Format == 10)
+            {
+                result = ImageTexture.CreateFromImage(FlverModelBuilder.DecodeArgbImage(
+                    dds.AsSpan(FlverModelBuilder.DdsHeaderLength(dds)), width, height, key));
+                _textures.Add(key, result); _textureBytes += estimate;
+                return result;
+            }
             using var stream = new MemoryStream(dds);
             using var decoded = Pfim.Pfimage.FromStream(stream);
             int channels = decoded.Format == Pfim.ImageFormat.Rgba32 ? 4 : decoded.Format == Pfim.ImageFormat.Rgb24 ? 3 : 0;

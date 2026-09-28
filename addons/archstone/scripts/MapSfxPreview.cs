@@ -188,7 +188,8 @@ public partial class MapSfxPreview : Node3D
             .Where(i => _placements[i].Available && _catalog.ContainsKey(_placements[i].EffectId))
             .Select(i => {
                 var description = _catalog[_placements[i].EffectId];
-                float origin = camera.GlobalPosition.DistanceTo(ToGlobal(_placements[i].Transform.Origin));
+                // Camera-attached effects (action46) ride the view: always in range.
+                float origin = description.CameraAttached ? 0 : camera.GlobalPosition.DistanceTo(ToGlobal(_placements[i].Transform.Origin));
                 var scale = (GlobalBasis * _placements[i].Transform.Basis).Scale.Abs();
                 float radius = description.CoverageRadius * Math.Max(scale.X, Math.Max(scale.Y, scale.Z));
                 return (Index: i, Origin: origin, Coverage: Math.Max(0, origin - radius), Radius: radius, Cost: description.Cost(origin));

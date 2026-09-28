@@ -12,6 +12,7 @@ public partial class SfxBatchParticles : Node3D
     private struct Particle
     {
         public double Birth, Time; // Time: when Position/Velocity were last integrated (motion84)
+        public double Clock0; // start of the instance clock this particle was emitted on
         public double Death; // effect-lifetime kill (template2023 arg15 / template2020 lifetime); +inf if none
         public Vector3 Position, Velocity, Gravity;
         public Vector2 Scale;
@@ -37,6 +38,31 @@ public partial class SfxBatchParticles : Node3D
     // from its spawn time. KillAtLife: children are deleted with the template at Delay + Life.
     internal sealed record NativeCarrier(double Delay, double Interval, int Count, double Life, int Instances,
         bool KillAtLife, Func<RandomNumberGenerator, Transform3D> Place);
+    // Emitter sequences are evaluated when the emitter runs, on the instance clock (time since the
+    // instance's startup). Tables sampled uniformly over [0, Span], held after it: speed (min, max)
+    // and the X/Y size multipliers (xMin, xMax, yMin, yMax), drawn per particle.
+    internal sealed record NativeEmitterCurves(float Span, Vector2[] Speed, Vector4[] Scale);
+    // A cluster gravity sequence (downward scalar) on the instance clock, as motion84's (research
+    // 10.5): G1/G2 are its first and second integrals, sampled like NativeEmitterCurves.
+    internal sealed record NativeGravityCurve(float Span, float[] G1, float[] G2, float Last)
+    {
+        // Integrals at clock t; past Span the gravity holds at Last.
+        internal (float V, float P) At(float t)
+        {
+            if (t <= 0) return (0, 0);
+            float over = Math.Max(0, t - Span);
+            float i = Math.Min(t, Span) / Span * (G1.Length - 1);
+            int k = Math.Min((int)i, G1.Length - 2); float f = i - k;
+            float v = Mathf.Lerp(G1[k], G1[k + 1], f), p = Mathf.Lerp(G2[k], G2[k + 1], f);
+            return (v + Last * over, p + v * over + 0.5f * Last * over * over);
+        }
+    }
+    private static T Sample<T>(T[] table, float span, float t, Func<T, T, float, T> lerp)
+    {
+        float i = Math.Clamp(t / span, 0, 1) * (table.Length - 1);
+        int k = Math.Min((int)i, table.Length - 2);
+        return lerp(table[k], table[k + 1], i - k);
+    }
     private sealed class Carrier { public double Spawn, Death; public Transform3D Frame; public long Next; }
     private readonly List<Carrier> _carriers = new();
     private NativeFinite _finite;
@@ -86,6 +112,8 @@ public partial class SfxBatchParticles : Node3D
     private bool _local;
     private NativeEmit32 _emit32;
     private NativeMotion84 _motion84;
+    private NativeEmitterCurves _curves;
+    private NativeGravityCurve _gravityCurve;
     private Vector3 _wind, _stepWind; // _stepWind: k*wind in particle storage space
     private double _tickSeconds;
     private long _ticks;
@@ -102,7 +130,8 @@ public partial class SfxBatchParticles : Node3D
     internal void Configure(ParticleProcessMaterial process, QuadMesh mesh, float life, int capacity,
         int batch, double interval, double delay, uint seed, bool local, int zeroWaitHz, Appearance appearance,
         NativeEmit32 emit32 = null, NativeMotion84 motion84 = null, Vector3 wind = default,
-        NativeFinite finite = null, NativeCarrier carrier = null, NativeDirection direction = null)
+        NativeFinite finite = null, NativeCarrier carrier = null, NativeDirection direction = null,
+        NativeEmitterCurves curves = null, NativeGravityCurve gravityCurve = null)
     {
         // Zero-wait state loops are scheduled on a bounded preview clock, never on render
         // frames and never with a zero divisor. Validate here as well as at recipe decoding.
@@ -120,7 +149,7 @@ public partial class SfxBatchParticles : Node3D
         _interval = interval; _delay = delay; _seed = seed; _local = local;
         _drag = process.DampingMin;
         _emit32 = emit32; _motion84 = motion84; _wind = wind; _stepWind = wind * (motion84?.Wind ?? 0);
-        _finite = finite; _carrier = carrier;
+        _finite = finite; _carrier = carrier; _curves = curves; _gravityCurve = gravityCurve;
         if (carrier != null && (carrier.Instances is < 1 or > 64 || !double.IsFinite(carrier.Interval) || carrier.Interval < 0 ||
             !double.IsFinite(carrier.Delay) || carrier.Delay is < 0 or > 60))
             throw new ArgumentOutOfRangeException(nameof(carrier), "Invalid bounded carrier schedule.");
@@ -264,7 +293,9 @@ public partial class SfxBatchParticles : Node3D
             for (int i = 0; i < count; i++)
             {
                 Vector3 position = frame * EmissionPosition(out var axis);
-                Vector3 velocity = EmissionDirection(axis) * _random.RandfRange(_speedMin, _speedMax);
+                float clock = (float)(birth - next.Spawn - _delay);
+                var speed = _curves == null ? new Vector2(_speedMin, _speedMax) : Sample(_curves.Speed, _curves.Span, clock, (a, b, f) => a.Lerp(b, f));
+                Vector3 velocity = EmissionDirection(axis) * _random.RandfRange(speed.X, speed.Y);
                 Vector3 gravity = _gravity;
                 bool world = _direction.World.HasValue;
                 if (world) velocity = _direction.World.Value * velocity;
@@ -277,12 +308,14 @@ public partial class SfxBatchParticles : Node3D
                     else if (_local && world) velocity = GlobalBasis.Inverse() * velocity;
                 }
                 var scale = Vector2.One;
-                if (_emit32 != null)
+                if (_emit32 != null || _curves != null)
                 {
-                    scale.X = Mathf.Lerp(_emit32.X.X, _emit32.X.Y, _random.Randf());
-                    scale.Y = _emit32.UniformXY ? scale.X : Mathf.Lerp(_emit32.Y.X, _emit32.Y.Y, _random.Randf());
+                    var r = _curves == null ? new Vector4(_emit32.X.X, _emit32.X.Y, _emit32.Y.X, _emit32.Y.Y)
+                        : Sample(_curves.Scale, _curves.Span, clock, (a, b, f) => a.Lerp(b, f));
+                    scale.X = Mathf.Lerp(r.X, r.Y, _random.Randf());
+                    scale.Y = _emit32?.UniformXY == true ? scale.X : Mathf.Lerp(r.Z, r.W, _random.Randf());
                 }
-                _live.Enqueue(new Particle { Birth = birth, Time = birth, Position = position, Velocity = velocity, Gravity = gravity,
+                _live.Enqueue(new Particle { Birth = birth, Time = birth, Clock0 = next.Spawn + _delay, Position = position, Velocity = velocity, Gravity = gravity,
                     Scale = scale, Angle = Mathf.DegToRad(_random.RandfRange(_angleMin, _angleMax)), Death = next.Death });
                 _nextDeath = Math.Min(_nextDeath, next.Death);
                 EmittedCount++;
@@ -393,6 +426,13 @@ public partial class SfxBatchParticles : Node3D
         float speed = p.Velocity.Length();
         float moving = _drag > 0 ? Math.Min(t, speed / _drag) : t;
         Vector3 travel = speed > 0 ? p.Velocity * (moving - 0.5f * _drag * moving * moving / speed) : Vector3.Zero;
+        if (_gravityCurve != null)
+        {
+            // Displacement under g(clock) from birth: G2(now) - G2(birth) - G1(birth) * t, downward.
+            var (vb, pb) = _gravityCurve.At((float)(p.Birth - p.Clock0));
+            var (_, pn) = _gravityCurve.At((float)(_age - p.Clock0));
+            travel.Y -= pn - pb - vb * t;
+        }
         return p.Position + travel + p.Gravity * (0.5f * t * t);
     }
 
