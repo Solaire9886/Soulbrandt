@@ -45,7 +45,7 @@ void fragment() {
 	vec3 spec = mix(texture(specular1, uv1).rgb, texture(specular2, uv2).rgb, blend);
 	// ponytail: linear mix of two tangent-space normal maps, not a proper renormalized blend.
 	vec3 sampled_normal = mix(texture(normal1, uv1).rgb, texture(normal2, uv2).rgb, blend);
-	vec3 pixel_normal = hemisphere_pixel_normal(decode_normal_map(sampled_normal.xy), FRONT_FACING);
+	vec3 pixel_normal = hemisphere_pixel_normal(decode_normal_map(sampled_normal.xy), UV, FRONT_FACING);
 	vec3 camera_position = INV_VIEW_MATRIX[3].xyz;
 	vec3 view_dir = normalize(camera_position - world_position);
 	// Radial distance for the shadow fade.

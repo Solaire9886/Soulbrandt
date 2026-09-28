@@ -30,7 +30,7 @@ vec3 lightmap_shade(vec2 uv, vec2 uv2, vec3 vertex_color, vec3 view_dir, float v
 	vec3 spec = texture(specular, duv).rgb;
 	vec3 sampled_normal = texture(normal_map, duv).rgb;
 
-	vec3 pixel_normal = hemisphere_pixel_normal(decode_normal_map(sampled_normal.xy), front_facing);
+	vec3 pixel_normal = hemisphere_pixel_normal(decode_normal_map(sampled_normal.xy), duv, front_facing);
 
 	vec3 shadow = sun_shadow(world_position, view_distance);
 	vec3 point_lights = point_lights_diffuse(world_position, pixel_normal);

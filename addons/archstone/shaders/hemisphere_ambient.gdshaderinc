@@ -48,6 +48,10 @@ uniform samplerCube env_dif_cube;
 uniform samplerCube env_spc_cube;
 
 uniform bool use_normal_map = false;
+// Skinned meshes: the Compatibility renderer's skinning pass drops TANGENT (Godot 4.7
+// drivers/gles3/storage/mesh_storage.cpp binds VERTEX twice in its attribute mask), so the
+// tangent frame is rebuilt per pixel from position and UV derivatives instead.
+uniform bool derive_tangent_frame = false;
 
 // Sun shadow, bound by ShadowRenderer from the map's SHADOW_BANK row. shadow_light_clip maps world
 // to light clip space (atlas UV = xy/w * 0.5 + 0.5); shadow_light_view rebuilds the linear depth
@@ -84,11 +88,25 @@ vec3 decode_normal_map(vec2 sampled_xy) {
 // Per-pixel normal through the TBN, or the vertex normal without a bump map. Flipped on back
 // faces so double-sided meshes shade toward the camera; FRONT_FACING is passed in because a
 // nested helper cannot read it. DeS bump X runs along +U and Y along +V (the FLVER tangent);
-// Godot's generated BINORMAL points along -V, so Y is negated.
-vec3 hemisphere_pixel_normal(vec3 tangent_space_normal, bool front_facing) {
+// Godot's generated BINORMAL points along -V, so Y is negated. The derived frame (Schuler's
+// cotangent frame) points its B along +V.
+vec3 hemisphere_pixel_normal(vec3 tangent_space_normal, vec2 uv, bool front_facing) {
 	vec3 n;
 	if (!use_normal_map) {
 		n = normalize(world_normal);
+	} else if (derive_tangent_frame) {
+		vec3 normal = normalize(world_normal);
+		vec3 dp1 = dFdx(world_position), dp2 = dFdy(world_position);
+		vec2 duv1 = dFdx(uv), duv2 = dFdy(uv);
+		vec3 dp2perp = cross(dp2, normal), dp1perp = cross(normal, dp1);
+		vec3 t = dp2perp * duv1.x + dp1perp * duv2.x;
+		vec3 b = dp2perp * duv1.y + dp1perp * duv2.y;
+		// The frame's sign follows the screen axes' handedness, which differs between render
+		// targets; the determinant's sign restores it.
+		float scale = sign(dot(normal, cross(dp1, dp2))) * inversesqrt(max(max(dot(t, t), dot(b, b)), 1e-20));
+		n = normalize(tangent_space_normal.x * t * scale
+			+ tangent_space_normal.y * b * scale
+			+ tangent_space_normal.z * normal);
 	} else {
 		n = normalize(tangent_space_normal.x * world_tangent
 			- tangent_space_normal.y * world_binormal
