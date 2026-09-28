@@ -40,10 +40,10 @@ and lighting work was such an interlude).
 
 **Next, roughly in order**
 1. **A player and camera** on the map collision.
-2. **More Havok content on the same reader**, one class family at a time: skeletons
-   (`hkaSkeleton`; object shapes are done, as static collision), then animation
-   (`hkaAnimationContainer`; DeS animations are wavelet-compressed) and posing (`InitAnimID`
-   on placed objects). Reference: `Grimrukh/soulstruct-havok` (GPL, Python, DeS-specific).
+2. **More Havok content on the same reader.** Collision, skeletons, animation (including the
+   wavelet format, from the executable), extracted root motion, `InitAnimID` posing and object
+   ambient loops are done (2026-09-28). Remaining: a controller that applies root motion (with
+   item 1), playback driven by TAE events and event scripts, and object simulation. Reference: `Grimrukh/soulstruct-havok` (GPL, Python, DeS-specific).
 3. **Map assembly:** navmesh (`NVM` already reads it), enemy/player placement once game logic
    exists (deliberately deferred until then), draw-group visibility (semantics unknown for
    DeS; needs a capture comparison), LOD selection, event scripts (`script/` Lua and `.esd`),

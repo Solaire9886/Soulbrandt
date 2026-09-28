@@ -76,12 +76,13 @@ code, assets or decryption.
 | `scripts/archstone.gd` | Editor plugin: the Archstone toolbar menu (mount, import, load, reload, debug overlay). |
 | `scripts/AssetExtractor.cs`, `extract_cli.gd` | Unpacks the user's game copy into `mounted/` (editor action or headless CLI). |
 | `scripts/FlverModelBuilder.cs` | FLVER0 → `ImporterMesh` with resolved materials and textures. No Godot import system involvement. |
-| `scripts/FlverLoader.cs` | Session mesh cache; `Instantiate`, `InstantiateWithDefaultDrawParams`, `InstantiateMap`; per-placement draw-parameter binding. |
+| `scripts/FlverLoader.cs` | Session mesh and animation caches; `Instantiate`, `InstantiateWithDefaultDrawParams`, `InstantiateMap`; per-placement draw-parameter binding and initial object poses. |
 | `scripts/MsbLoader.cs` | MSB parsing only (parts, point lights, SFX events, region boxes, tone IDs). No scene nodes. |
 | `scripts/DrawParamReader.cs` | Draw-parameter bank rows and env cubemap names. |
 | `scripts/ShaderLibrary.cs` | Reads the shader library's names as data (material → shader family/features). |
 | `scripts/ShadowRenderer.cs` | Static sun-shadow depth pass per loaded map. |
 | `scripts/MapCollision.cs` | MSB collision and object parts as static bodies from their Havok shapes. |
+| `scripts/ModelAnimation.cs` | A model's Havok animations as an `AnimationLibrary` driving its `Skeleton3D`. |
 | `scripts/PostProcessPipeline.cs` | Exposure adaptation and bloom (the game's post chain). |
 | `scripts/SfxLoader.cs`, `SfxPreview*.cs`, `SfxBatchParticles.cs` | FFX effect reading and billboard playback. |
 | `scripts/MapSfxPreview*.cs` | Per-map effect controller (MSB events, object and camera-region sources). |
@@ -146,7 +147,8 @@ These are correct as implemented; do not "fix" them.
   palette of `FLVER.Node`s and each vertex's first bone index selects its node; `BuildMesh`
   composes each node's transform through its parents and applies it per vertex in FLVER space
   (`GetRigidNodeTransforms`). Without this, decorations sit at the origin. Skinned meshes
-  (`UseBoneWeights`) are left in bind pose.
+  (`UseBoneWeights`) are stored in bind pose and deformed through a skeleton (see "Skeletons
+  and animation").
 - **Missing vertex channels are real.** Some meshes' layouts omit normal/UV/colour (e.g.
   `m9999b0`, `m9900`, `o9996`); the builder substitutes defaults, and requests
   `Triangulate`'s flip check only when normals exist.
@@ -160,7 +162,8 @@ These are correct as implemented; do not "fix" them.
   `GenerateTangents()` runs afterwards. **Bump Y is negated:** DeS bump maps put X along +U and
   Y along +V (the fragment program's Y axis is the FLVER tangent, X is `cross(N, T)·w`;
   measured on every bumped m02 piece), while Godot's generated `BINORMAL` points along −V.
-  `hemisphere_pixel_normal` subtracts the Y term. The lightmap UV of blend materials rides in
+  `hemisphere_pixel_normal` subtracts the Y term. On FLVERs with a skeleton the frame is derived
+  per pixel instead (see "Skeletons and animation"). The lightmap UV of blend materials rides in
   `Custom0` (`RgFloat`, passed through `ImporterMesh.AddSurface`'s `flags`).
 - **Zero-mesh objects are real:** 62 of 1068 `obj/` FLVERs have no mesh (57 dummy-only
   attach markers, 5 empty stubs). Destructible-prop debris (`o6511`–`o6602`) pairs a
@@ -278,8 +281,8 @@ collision (`Collision`), the objects' collision (`ObjectCollision`) and a disabl
   `DummyObject`/`DummyEnemy`, `ConnectCollision`.
 - **Known data oddities:** some objects are event- or cutscene-gated (MSB lists everything
   that could appear; the gate is event scripting); `o1450_0001`–`_0003` sit at the origin in
-  the data itself (`InitAnimID = −1`, likely inactive stubs); reused bodies such as `o0500`
-  render in bind pose because `InitAnimID` needs animation playback.
+  the data itself (`InitAnimID = −1`, likely inactive stubs). Objects with animations are
+  posed from `InitAnimID` (see "Skeletons and animation"; `o0500` is a body in many poses).
 - **`DrawGroups`/`DispGroups` are not used.** In DeS, map pieces and objects carry group
   membership in `DrawGroups` (`DispGroups` all zero); collisions carry their own group as one
   `DispGroups` bit and the groups visible from them in `DrawGroups`. Map SFX are created only
@@ -379,6 +382,104 @@ render geometry within 1 m of each collision triangle, over 15 main blocks:
 Types 0, 6–8, 11, 12, 15, 18, 19, 25, 26, 40 and 90–92 match no clear texture. Some are
 mostly away from any render geometry, i.e. invisible surfaces: 40 (2 of 62 triangles near
 geometry), 7 (603 of 4,306), 0 (20,269 of 33,786).
+
+## Skeletons and animation
+
+**Skeletons.** A FLVER with any skinned mesh (`UseBoneWeights`), or with animations (below),
+gets a `Skeleton3D` ("Skeleton") built from its nodes. Rests are the nodes' local transforms
+mirrored as S·M·S; a `Skin` binds each bone to the inverse of its global rest, so the mesh,
+stored in bind pose, is unchanged at rest (c5010: 5 of 810,000 pixels differ from the
+unskinned mesh). Every surface of such a FLVER carries four bone indices and weights:
+
+- Skinned vertices use their palette slots and normalised weights. A skinned vertex with
+  all-zero weights (whole meshes in c2101, c4000, o5260; 13,984 vertices) is bound fully to its
+  first bone, as soulstruct reads them.
+- Rigid vertices, already placed by their node, are bound to that node with weight 1, so they
+  follow it when it moves. o9993's rigid mesh names a slot past its palette (29 of 28) and binds
+  to bone 0.
+- `Skeleton3D` bone names must be unique and free of `:` and `/`. A repeated node name (c6041's
+  `c6041` stub and real root; some parts) gets its index as a suffix: `c6041 (1)`.
+- Godot composes rests as full matrices, so a child inherits its parent's scale. Havok's rule
+  (T' = R1(S1·T2) + T1, R' = R1R2, S' = S1S2) agrees whenever the parent's scale is uniform;
+  six bones have children under a non-uniform scale (c1070/c1080 tongue, c2090/c2095 sleeves,
+  c7150 weapon), where the bind positions differ by under 3 cm. A scaled bone such as c5010's
+  pauldrons (3.1285) carries its scale in the rest, the bind and every animation frame, so it
+  cancels.
+
+**Tangents on skinned meshes.** Godot 4.7's Compatibility renderer drops `TANGENT` when it
+skins a mesh: the skinning pass's attribute mask (`drivers/gles3/storage/mesh_storage.cpp`)
+lists `ARRAY_FORMAT_VERTEX` twice where `ARRAY_FORMAT_TANGENT` belongs (still so on master), so
+every skinned vertex gets one constant tangent. Materials of FLVERs with a skeleton set
+`derive_tangent_frame`, and `hemisphere_pixel_normal` rebuilds the frame per pixel from position
+and UV derivatives (Schüler's cotangent frame, signed by the screen axes' handedness, which
+differs between render targets). On c5010 it matches the vertex tangents to 118 of 810,000
+pixels. Only the lit shader family has this.
+
+**Havok skeletons and animations** (`Formats/HKX/` in the fork). `HKX.ReadSkeletons` reads
+`hkaSkeleton`: bone names, parents, `lockTranslation`, the reference pose (`hkQsTransform`) and
+float slots. `HKX.ReadAnimations` returns each `hkaAnimationBinding`'s animation decoded to evenly
+spaced frames of `hkQsTransform`s, with the track-to-bone map (identity in every DeS file):
+
+- `hkaInterleavedSkeletalAnimation`: stored frames (266 clips, all two-frame poses).
+- `hkaWaveletSkeletalAnimation`, 2,754 Havok 5.5.0 and 43 Havok 5.1.0 clips (5.1.0 has no
+  `numberOfFloatTracks`, so its later fields sit 4 bytes earlier). No public decoder exists
+  (soulstruct shells out to a closed executable); this one follows a behavioural specification
+  of the game's sampler (research dump, `ELF_ENGINE_ACCURACY_RESEARCH.md` section 20). The data
+  buffer is little-endian inside the big-endian file. Per eight-frame block, each dynamic value
+  is a zero mask plus `bw`-bit coefficients, dequantised as `scale · 2^−bw · (q + 0.5) + offset`
+  and inverse-transformed by a fixed 8×8 matrix. A per-track mask makes each component static,
+  dynamic or identity; a stored quaternion w of ±2 means w is rebuilt from x, y, z.
+- Checks: in every 5.x clip the dynamic count matches the mask and the static values fill their
+  region exactly, and each block's bytes are consumed exactly. Quaternions come out unit length
+  (worst 9e-4) and frame-to-frame changes are no larger across block boundaries than inside
+  blocks. The C# decoder matches the Python prototype to float precision; 4,318 clips decode in
+  1.8 s.
+- Not read: delta compression and Havok 4.x skeletons (only c0100, c0200, c1090 and c9xxx use
+  them, and no used map places those: c0100 appears only in the unused `m07_02` block), c3010's
+  one clip with two-frame blocks, float tracks, annotation tracks.
+- Extracted motion: every decoded clip's animation points to an
+  `hkaDefaultAnimatedReferenceFrame` (up, forward, duration, samples; at `hkaAnimation` +24, +20
+  in 5.1.0), read into `ExtractedMotion`. Moving clips have one sample per frame, static ones two
+  zero samples (3,251 and 980 across chr and obj). A sample is the translation from the clip's
+  start in x, y, z and the accumulated yaw about +Y in radians in w (c4040's `a00_0602`/`0603`
+  end at ∓π/2, `0604`/`0605` at ±π). The bone tracks stay in place (c5010's walk moves its root
+  bone under 0.5 mm while the reference frame travels 5.98 m). Five static c7050 clips name +Z
+  up; none with motion does.
+
+**Animation in Godot (`ModelAnimation`).** Characters keep loose files, `chr/<id>/hkx/**/*.hkx`
+(the player's 1,264, of which 1,256 decode, sit in per-category subfolders); objects keep
+`obj/<id>/hkx/<id>.anibnd`, a BND3 read in memory. Each `a*.hkx` becomes one `Animation`,
+named after the file, in the default library of an `AnimationPlayer` ("AnimationPlayer"), with
+position, rotation and scale keys at the decoded frames on `Skeleton:<bone>`, mirrored as
+translation (−x, y, z), rotation (x, −y, −z, w), scale unchanged.
+
+- Root motion: the extracted motion keys the `Skeleton` node's own position and rotation
+  (`ModelAnimation.RootMotionTrack`), mirrored as (−x, y, z) and yaw −w. Played as is, a clip moves
+  the character within its model node from the clip's start and returns at each loop. A
+  controller that moves the model instead sets `AnimationMixer.RootMotionTrack` to that path and
+  applies `GetRootMotionPosition`/`GetRootMotionRotation`; none exists yet.
+- The mesh of a model with a skeleton is the skeleton's child (`Skeleton/Mesh`): Godot draws a
+  skinned mesh with its own node's transform, so as the skeleton's sibling it stayed behind when
+  the skeleton node moved.
+
+- Havok bones bind to FLVER nodes by name. Every Havok 5.x skeleton's names and parents match
+  its FLVER's, except c2075's extra identity root `Ctl_master`. A repeated name binds to the node
+  nearest the Havok reference pose (c6041's track goes to its real root).
+- A bound bone without a track holds the Havok reference pose; FLVER-only nodes stay at rest.
+  Havok's `*Nub` leaf bones carry a mirroring reference pose (180° about Z, scale (−1, 1, 1));
+  they have no children and no weights.
+- Facing: the FLVER rest pose, the idle and the walk clips face −Z in file space, and forward
+  walks' extracted motion travels −Z (c5010: foot-to-toe direction against root motion,
+  cos 0.99), so the conversion keeps the game's facing.
+- Cost: 0.17–0.22 s for all of a character's clips (c2010: 99); about 88 ms per map for objects.
+
+**Initial object poses.** An object part's `InitAnimID` names clip `a00_<id:0000>` (−1: none).
+`InstantiatePlacement` sets the skeleton to that clip's first frame and assigns the clip. Of
+1,604 placements with an ID and an archive, 1,561 resolve (18 name a missing clip, 25 an
+unsupported one); 1,373 of those clips are constant poses and stay still. The rest are ambient
+loops ending within 0.01 of their start, and play looping (m02: 25, the `o5995` pieces; m05_01:
+2). Looping is set on the clip in the shared library. The game may start or stop them from event
+scripts or TAE, which are not read.
 
 ## Draw parameters
 
@@ -528,6 +629,7 @@ materials take the bank's density unscaled (confirmed in every capture, includin
 Soulbrandt's stand-in (v2) is **one static orthographic depth pass** per map, from
 `SHADOW_BANK` row 0's direction, over the lit casters' bounds (radius `min(½·diagonal + 2,
 200)`), into a 2048² `SubViewport`. Casters are sibling `MeshInstance3D`s sharing each mesh
+(a skinned caster is copied with its `Skeleton`, so it casts its placed pose, frozen at load)
 with `shadow_depth.gdshader` (`cull_front`, linear light-space depth packed 16-bit across
 R,G); alpha-tested surfaces take `shadow_depth_alpha.gdshader`, which also discards below the
 material's alpha threshold (still `cull_front`: casting both faces self-shadowed closed
@@ -758,10 +860,11 @@ applies to `AssetExtractor` and `FlverLoader`, which still do real I/O and decod
   restoration.
 
 **Data and systems**
-- Havok beyond static collision: skeletons, animation (the wavelet-compressed format), object
-  simulation (motion types, mass, constraints, ragdolls, breakable debris) and Havok 4.x files.
-  `Grimrukh/soulstruct-havok` is the DeS-specific reference; the unmerged 2018
-  `SoulsFormatsNEXT` branch is a rougher one.
+- Havok beyond collision, skeletons and animation: applying root motion to a moving model,
+  animation playback driven by TAE/event scripts (all 122 chr `.tae` files read; 42 event types,
+  unnamed), object simulation (motion types, mass, constraints, ragdolls,
+  breakable debris), delta compression and Havok 4.x files (characters no used map places).
+  `Grimrukh/soulstruct-havok` is the DeS-specific reference for layouts.
 - Enemy/player placement, navmesh wiring, event scripts, `.breakobj` debris, cutscenes
   (`remo/scnAAxxxx.remobnd`: camera, Havok animation and `.tae` per cut).
 - Runtime-placed geometry: Nexus captures 094137/094221 draw a colonnade at a transform no
@@ -772,5 +875,6 @@ applies to `AssetExtractor` and `FlverLoader`, which still do real I/O and decod
 
 **`SoulsFormatsNEXT` fork** (submodule; `origin` is the fork, `upstream` is `soulsmods`):
 local commits are the FLVER0 UV-scale fix, the `net8.0` retarget, the DeS `FFXDLSE` mode and
-the read-only Havok packfile reader (`Formats/HKX/`, new files only).
+the read-only Havok packfile reader with collision, skeletons and animation (`Formats/HKX/`,
+new files only).
 Re-check the UV fix after any upstream sync.

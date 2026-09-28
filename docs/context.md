@@ -264,7 +264,10 @@ unused; the unmerged `old-kata-2018-dec-13` branch (commits `29cd70b`/`73fd675`)
 vertices and indices; rough, write unimplemented, no animation); `SoulsAssetPipeline`'s generic
 Havok reader supports SDK 2015+ only; `Grimrukh/soulstruct-havok` has working DeS
 (Havok 5.5.0) skeleton, animation (wavelet-compressed) and collision classes via the packfile
-path. Its bundled Windows tools are for writing only.
+path. Its bundled Windows tools are for writing only. (Correction, 2026-09-28: soulstruct reads
+DeS animations by shelling out to a closed `HavokWaveletAnim.exe`, still so in 3.2.1, and
+PredatorCZ's HavokLib lists the wavelet class "without decompressor"; Soulbrandt's decoder
+comes from the executable.)
 
 ## Effects (2026-09-06 to 09-15)
 
@@ -772,3 +775,59 @@ zip, `soulstruct-havok/src/soulstruct/havok/types/hk550`) as references.
     probes give the same hit points as before.
 - **Not yet read:** object simulation (motion types, mass, constraints), Havok 4.x files and
   everything animation-side.
+
+### Havok skeletons, wavelet animation and object poses (2026-09-28)
+
+The user asked for roadmap items 3 (skeletons) and 4 (animation) together, after soulstruct
+3.2.1 turned out to still use a closed wavelet converter.
+
+- **Census.** 3,063 Havok 5.x animation files under `chr/*/hkx`: 2,754 wavelet (5.5.0), 43
+  wavelet (5.1.0, c2020/c8020), 266 interleaved (all two-frame poses, mostly `a00_2210`). So every
+  moving clip is wavelet. The first census missed `Skeleton.HKX` spellings (glob was
+  case-sensitive): 86 Havok 5.x skeletons, not 55.
+- **Skeletons.** Every Havok 5.x skeleton binds to its FLVER by name with the same parents (one
+  exception: c2075's identity `Ctl_master` root). Reference poses equal the FLVER rests for 5,070
+  of 6,035 bones; the rest are `*Nub` leaves (a mirroring pose) and characters whose Havok
+  reference pose is a different rest (c6020, c1030, c5031); animations override them anyway.
+  Scale inheritance was tested against vertex positions on the six bones with children under a
+  non-uniform scale: the two conventions differ by under 3 cm, so Godot's matrix composition
+  stays (ARCHITECTURE, "Skeletons and animation").
+- **Godot bug found.** Skinned meshes under Compatibility lost their tangent frame (bump shading
+  changed on 10,646 pixels of c5010). Debug renders showed `TANGENT` constant after skinning;
+  Godot's source has `ARRAY_FORMAT_VERTEX` twice in the skinning pass's attribute mask (4.7-stable
+  and master). A rebuilt mesh or the compressed vertex format does not avoid it. Fixed on our
+  side with a derivative-based frame; its first version came out exactly negated (T and B at
+  dot −1 against the vertex tangents) because the screen axes' handedness differs from
+  Schüler's assumption; signing by `N·(dp1 × dp2)` fixed it (118 pixels left). Worth reporting
+  upstream.
+- **Wavelet decoder from the ELF** (research dump section 20). RTTI name → typeinfo → vtable
+  gave the sampler (`sampleTracks`) and four helpers behind TOC-switching linker stubs. Findings
+  that took data to settle: the data buffer is little-endian (the masks read as nonsense and the
+  static values as huge floats until swapped; the 2.0 quaternion sentinels then appear), and
+  the static values end at `offsetIdx`, not `blockIndexIdx`. With both, every clip's counts come
+  out exact, and every block's bytes are consumed exactly. The closed converter was not used as
+  an oracle: it needs a little-endian file, and swapping the buffer would have presumed the
+  answer.
+- **Object poses.** `InitAnimID` → `a00_<id:0000>` fits the data (o0052's IDs 0–3 against clips
+  0000–0003; o0500's corpse poses). Objects with archives get skeletons even when their meshes
+  are rigid.
+- **Checks.** Rest pose unchanged under skinning (5 pixels); a rotated arm deforms the mesh; attack
+  and idle clips pose coherently; c6041 binds its real root; all 1,772 chr/obj/parts FLVERs load
+  (48 s); m02 with objects posed renders within 22 pixels of the pre-change baseline; no shader
+  errors.
+- **Misleading hang.** A headless check script "hung" at o9993 with the main thread idle: the
+  load had thrown (o9993's rigid mesh names palette slot 29 of 28, which also broke the old
+  rigid path), the script errored on the null result and never reached `quit()`, so Godot kept
+  idling. Low CPU plus a sleeping main thread means a script error, not a deadlock; write check
+  scripts to report and continue on a null result.
+- **Root motion and ambient loops** (same day, after asking whether playback was feasible). A
+  class census of the 5.x clips found an `hkaDefaultAnimatedReferenceFrame` in every one; soulstruct
+  does not read it. W as yaw was confirmed on turn clips: the head leads the root's turn with the
+  same sign through c4040's 90° turns. First attempt keyed the `Skeleton` node while the mesh
+  was its sibling: the skeleton moved 6 m and the rendered mesh did not, since Godot 4 draws a
+  skinned mesh at its own node's transform. Moving the mesh under the skeleton fixed it; the
+  two lookups by `"Mesh"` path now go through `ModelMesh`. TAE census for later: SoulsFormats
+  reads all 122 chr `.tae` files (7,272 entries, 55,533 events, 42 types), with no DeS event
+  names or parameter layouts in our tree. The shadow pass's caster copies had no skin, so
+  posed objects cast rest-pose shadows; they now copy the `Skeleton` with its mesh (m02: 101
+  skinned copies, all bound, 73 away from rest).
