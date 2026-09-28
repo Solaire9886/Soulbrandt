@@ -1,12 +1,12 @@
 shader_type spatial;
 // Unshaded (a finished colour). blend_mix with ALPHA = 1 keeps it on the transparent pass so the
-// screen and depth textures are readable for the refraction and reflection taps.
+// screen and depth textures are readable for the refraction tap.
 render_mode blend_mix, cull_back, unshaded;
 
 // Reconstructed from DS_Water_Env (107 instructions), DS_Water, the water .mtd parameters and six
 // captured water draws (docs/context.md, "Water"): three scrolling bump octaves, a
-// Fresnel-weighted mix of the refracted body and the reflection (cubemap, screen tap, sun glint),
-// then the shared output stage.
+// Fresnel-weighted mix of the refracted body and the reflection (cubemap, sun glint), the shared
+// output stage, and a fade back to the body where the vertex alpha marks the shoreline.
 uniform sampler2D bumpmap : hint_normal;
 // g_Envmap, a small cubemap sampled by the reflection vector (FlverModelBuilder.ResolveWaterEnvCube;
 // a dim neutral cube when unresolved).
@@ -29,24 +29,28 @@ uniform float tile_blend_0 = 1.0;
 uniform float tile_blend_1 = 0.8;
 uniform float tile_blend_2 = 0.5;
 
-// g_WaterColor: .rgb body tint (c36); .a in water_alpha, the body-vs-refraction mix.
+// g_WaterColor: .rgb body colour (c36); .a (c40.w) scales the vertex alpha in the body mix.
 uniform vec3 water_color : source_color = vec3(0.09, 0.078, 0.031);
-uniform float water_alpha = 0.7;
-// g_RefractBand / g_ReflectBand: screen-UV perturbation of the two screen taps.
+uniform float water_alpha = 1.0;
+// g_RefractBand (c11.x): screen-UV offset of the refraction tap per unit of wave normal.
 uniform float refract_band = 0.15;
-uniform float reflect_band = 0.1;
-// g_FresnelPow / Bias / Scale / Color. pow 0 gives constant reflectance.
+// g_FresnelPow / Bias / Scale / Color (c33.x, c41.x, c42.x, c25).
 uniform float fresnel_pow = 3.0;
 uniform float fresnel_bias = 0.1;
 uniform float fresnel_scale = 0.9;
 uniform vec3 fresnel_color : source_color = vec3(1.0);
-// g_WaterFadeBegin: width in metres of the dark band where water meets the shore.
-uniform float water_fade_begin = 0.5;
+// g_WaterFadeBegin (c46.x, reciprocal in c48.y): the vertex alpha below which the surface fades
+// to the plain body. Water meshes author their shoreline in vertex colour: alpha for this fade,
+// RGB as a multiplier (m02's river banks carry 0.5).
+uniform float water_fade_begin = 0.7;
 // g_BumpMapSmoose: a bias added to the summed wave normal's Z (negative = choppier).
 uniform float bump_smoose = 1.0;
 // g_SpecularMapColor / g_SpecularMapColorPower: the sun-glint weight (c39) on its own.
 uniform vec3 glint_color : source_color = vec3(1.0);
 uniform float glint_power = 2.0;
+// Toward-light vector of LIGHT_BANK directional light 0 (c22), which the glint follows; the
+// scattering sun is a different vector. Bound per placement by FlverLoader.
+uniform vec3 glint_light_direction = vec3(0.0, 1.0, 0.0);
 
 varying vec3 world_position;
 
@@ -70,50 +74,39 @@ void fragment() {
 	// Weighted sum, not renormalised, then g_BumpMapSmoose added to Z (as in the disassembly).
 	vec3 wave = n0 * tile_blend_0 + n1 * tile_blend_1 + n2 * tile_blend_2;
 	vec3 tangent_normal = normalize(vec3(wave.xy, max(wave.z + bump_smoose, 0.1)));
-	vec3 N = normalize(TANGENT * tangent_normal.x + BINORMAL * tangent_normal.y + NORMAL * tangent_normal.z);
+	// DS_Water_Env reads the wave normal as the world normal (x, z, y), assuming flat water; X is
+	// negated for Godot's mirrored space. N is its view-space copy.
+	vec3 n_world = normalize(vec3(-tangent_normal.x, tangent_normal.z, tangent_normal.y));
+	vec3 N = normalize((VIEW_MATRIX * vec4(n_world, 0.0)).xyz);
 
-	float ndv = clamp(dot(N, normalize(VIEW)), 0.0, 1.0);
-	float fresnel = fresnel_pow > 1e-3
-		? clamp(fresnel_bias + fresnel_scale * pow(1.0 - ndv, fresnel_pow), 0.0, 1.0)
-		: clamp(fresnel_scale, 0.0, 1.0);
+	// Vertex colour (TEX6), passed through unchanged by DS_Water.
+	float vertex_alpha = COLOR.a;
+	bool measure = DES_MEASURING;
 
+	// Refraction: the offset is scaled by vertex alpha, and falls back to the unperturbed tap where
+	// it lands on nearer geometry (the engine tests the scene buffer's alpha instead). The screen
+	// holds encoded colour, decoded to scene radiance as the engine does before mixing.
 	float raw_depth = texture(depth_tex, SCREEN_UV).r;
-
-	vec3 camera_position = INV_VIEW_MATRIX[3].xyz;
-	vec3 view_dir = normalize(camera_position - world_position);
-	float view_distance = length(world_position - camera_position);
-	// Only the reflection tap's offset is distance-scaled in the disassembly; the refraction tap's
-	// is not. ponytail: the falloff shape stands in for the untraced per-vertex factor f[TEX6].
-	float near_fac = clamp(2.0 / max(view_distance, 1.0), 0.0, 1.0);
-
-	// Refraction, falling back to the unperturbed UV where the offset tap lands on nearer geometry.
-	vec2 refract_uv = SCREEN_UV + N.xy * refract_band;
+	vec2 refract_uv = SCREEN_UV + tangent_normal.xy * (refract_band * vertex_alpha);
 	if (texture(depth_tex, refract_uv).r > raw_depth)
 		refract_uv = SCREEN_UV;
-	vec3 refracted = textureLod(screen_tex, refract_uv, 0.0).rgb;
-	vec3 screen_reflection = textureLod(screen_tex, SCREEN_UV + N.xy * (reflect_band * near_fac), 0.0).rgb;
+	vec3 refracted = des_decode(textureLod(screen_tex, refract_uv, 0.0).rgb, measure);
+	vec3 body = mix(refracted, water_color, vertex_alpha * water_alpha);
 
-	vec3 body = mix(refracted, water_color, water_alpha);
+	// Fresnel scale * (bias + (1 - bias) * (1 - N.V)^pow).
+	float ndv = max(dot(N, normalize(VIEW)), 0.0);
+	float fresnel = fresnel_scale * (fresnel_bias + (1.0 - fresnel_bias) * pow(max(1.0 - ndv, 1e-6), fresnel_pow));
 
-	// Shoreline band from the depth of the water column behind this pixel.
-	// ponytail: a linear mix toward water_color; the game's band shape is not captured.
-	vec4 view_pos = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, raw_depth, 1.0);
-	view_pos.xyz /= view_pos.w;
-	float column = abs(view_pos.z - VERTEX.z);
-	float shore_edge = 1.0 - clamp(column / max(water_fade_begin, 1e-3), 0.0, 1.0);
-
-	// Reflection: cubemap, screen tap for near geometry, and the sun glint
-	// pow(R . sun, g_SpecularPower = 100) weighted by glint_color * glint_power only (a captured
-	// draw shows no sun-intensity factor). The sun direction is the scattering bank's.
-	vec3 n_world = normalize((INV_VIEW_MATRIX * vec4(N, 0.0)).xyz);
+	// Reflection: cubemap plus the sun glint pow(R . L, g_SpecularPower = 100); no screen tap.
+	vec3 view_dir = normalize(INV_VIEW_MATRIX[3].xyz - world_position);
 	vec3 refl_vec = reflect(-view_dir, n_world);
-	vec3 cube_reflection = texture(envmap, refl_vec).rgb;
-	float glint = pow(max(dot(refl_vec, -scatter_light_dir), 0.0), 100.0);
-	vec3 reflection = mix(cube_reflection, screen_reflection, near_fac * 0.35) * fresnel_color
-		+ glint * glint_color * glint_power;
+	vec3 cube_reflection = texture(envmap, refl_vec * vec3(-1.0, 1.0, 1.0)).rgb; // cube is in FLVER (X-mirrored) space
+	float glint = pow(max(dot(refl_vec, glint_light_direction), 0.0), 100.0);
+	vec3 reflection = cube_reflection * fresnel_color + glint * glint_color * glint_power;
 
-	vec3 surface = mix(body, reflection, fresnel);
-	surface = mix(surface, water_color, shore_edge);
-	ALBEDO = des_output(surface);
+	vec3 surface = mix(body, reflection, fresnel) * COLOR.rgb;
+	// Below g_WaterFadeBegin the atmosphere-applied surface fades to the unfogged body.
+	float shore = min(vertex_alpha, water_fade_begin) / max(water_fade_begin, 1e-3);
+	ALBEDO = mix(des_exposed(body, measure), des_output(surface), shore);
 	ALPHA = 1.0;
 }

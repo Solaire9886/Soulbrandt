@@ -263,6 +263,11 @@ public partial class FlverLoader : RefCounted
 				if (receivesPointLights)
 					BindPointLights(material, lightQueryPosition);
 			}
+			// Water's sun glint follows directional light 0 (DS_Water_Env c22).
+			if (HasUniform(baseMaterial.Shader, "glint_light_direction"))
+				material.SetShaderParameter("glint_light_direction", SunDirection(
+					System.Convert.ToSingle(row["degRotX_0"].Value),
+					System.Convert.ToSingle(row["degRotY_0"].Value)));
 			if (wantsOutputStage)
 			{
 				ApplyScatterBank(material, scatterRow);

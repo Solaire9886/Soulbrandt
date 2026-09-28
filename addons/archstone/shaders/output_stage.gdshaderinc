@@ -124,6 +124,20 @@ vec3 des_encode(vec3 value, bool measure) {
 	return measure ? clamp(value * 0.5, 0.0, 1.0) : des_tone_correct(clamp(value, 0.0, 1.0));
 }
 
+// Inverse of des_encode followed by the exposure: a scene-texture colour back to scene radiance, as
+// DS_Water_Env decodes its refraction tap. Values des_encode clamped stay clamped.
+vec3 des_decode(vec3 encoded, bool measure) {
+	vec3 c = encoded * 2.0;
+	if (!measure) {
+		c = des_hue_rotate(encoded, -des_tone_hue_radians);
+		float luma = dot(c, vec3(0.299, 0.587, 0.114));
+		c = vec3(luma) + (c - vec3(luma)) / max(des_tone_saturation, 1e-3);
+		c = (c - vec3(0.5)) / max(des_tone_contrast, vec3(1e-3)) + vec3(0.5);
+		c /= max(des_tone_brightness, vec3(1e-3));
+	}
+	return c / max(des_exposure(), 1e-6);
+}
+
 // The same for an additive or subtractive draw. The engine applies the tone-correction matrix
 // once, to the blended buffer: M(a + b) = M(a) + (M(b) - M(0)), so a term blended onto an
 // already-corrected colour carries the matrix's linear part only, not its offset a second time.

@@ -567,14 +567,14 @@ public partial class FlverModelBuilder : RefCounted
 	private readonly record struct MtdShading(
 		float Roughness, int LightingType, Color Tint, DesBlendMode BlendMode, Vector2 TexScroll0,
 		Vector2 TexScroll1, int EnvSpcSlot, string ShaderFamily, string ShaderFeatures, float SpecularPower,
-		Color SpecularTint)
+		Color SpecularTint, float ShadowPowMul)
 	{
 		// g_LightingType 0: sky domes, ghost/dissolve, effect-like materials.
 		public bool IsUnlit => LightingType == 0;
 		// EnvSpcSlot -1: no g_EnvSpcSlotNo (82 MTDs). Empty ShaderFamily: the MTD could not be read,
 		// so ClassifyMaterial falls back to texture-slot heuristics.
 		public static readonly MtdShading Defaults =
-			new(1.0f, 1, Colors.White, DesBlendMode.Opaque, Vector2.Zero, Vector2.Zero, -1, "", "", 8.0f, Colors.White);
+			new(1.0f, 1, Colors.White, DesBlendMode.Opaque, Vector2.Zero, Vector2.Zero, -1, "", "", 8.0f, Colors.White, 1.0f);
 
 		// Unlit materials that need vfx_scroll: a scrolling UV, or alpha/additive blending, whose
 		// output stage (fog, scattering, scene-buffer encoding) StandardMaterial3D cannot express.
@@ -635,7 +635,9 @@ public partial class FlverModelBuilder : RefCounted
 					roughness, lightingType, tint, (DesBlendMode)GetMtdInt(mtd, "g_BlendMode", 0),
 					GetMtdVector2(mtd, "g_TexScroll_0", Vector2.Zero),
 					GetMtdVector2(mtd, "g_TexScroll_1", Vector2.Zero),
-					GetMtdInt(mtd, "g_EnvSpcSlotNo", -1), family, features, specularPower, specularTint);
+					GetMtdInt(mtd, "g_EnvSpcSlotNo", -1), family, features, specularPower, specularTint,
+					// Scales the sun shadow's (density - tint); absent (every lightmapped MTD) is 1.
+					GetMtdFloat(mtd, "g_ShadowPowMul", 1.0f));
 			}
 			catch (Exception) { /* fall through to defaults below */ }
 		}
@@ -698,6 +700,7 @@ public partial class FlverModelBuilder : RefCounted
 			mat.SetShaderParameter("alpha_scissor_threshold", scissorThreshold);
 
 		mat.SetShaderParameter("diffuse_tint", shading.Tint);
+		mat.SetShaderParameter("shadow_pow_mul", shading.ShadowPowMul);
 		mat.SetShaderParameter("tex_scroll_0", shading.TexScroll0);
 		mat.SetMeta(EnvSpcSlotMeta, shading.EnvSpcSlot);
 
@@ -743,6 +746,7 @@ public partial class FlverModelBuilder : RefCounted
 		// One tint per material, applied after the blend.
 		var shading = ResolveMtdShading(flverMaterial);
 		mat.SetShaderParameter("diffuse_tint", shading.Tint);
+		mat.SetShaderParameter("shadow_pow_mul", shading.ShadowPowMul);
 		mat.SetShaderParameter("specular_tint", shading.SpecularTint);
 		mat.SetShaderParameter("tex_scroll_0", shading.TexScroll0);
 		mat.SetShaderParameter("tex_scroll_1", shading.TexScroll1);
@@ -784,14 +788,13 @@ public partial class FlverModelBuilder : RefCounted
 				mat.SetShaderParameter("tile_blend_2", GetMtdFloat(mtd, "g_TileBlend_2", 0.0f));
 				mat.SetShaderParameter("water_color", GetMtdColor3(mtd, "g_WaterColor", new Color(0.1f, 0.15f, 0.2f)));
 				// g_WaterColor's 4th component (alpha) - see water.gdshader for how it's used.
-				mat.SetShaderParameter("water_alpha", GetMtdFloat4Alpha(mtd, "g_WaterColor", 0.7f));
+				mat.SetShaderParameter("water_alpha", GetMtdFloat4Alpha(mtd, "g_WaterColor", 1.0f));
 				mat.SetShaderParameter("refract_band", GetMtdFloat(mtd, "g_RefractBand", 0.15f));
-				mat.SetShaderParameter("reflect_band", GetMtdFloat(mtd, "g_ReflectBand", 0.1f));
 				mat.SetShaderParameter("fresnel_pow", GetMtdFloat(mtd, "g_FresnelPow", 3.0f));
 				mat.SetShaderParameter("fresnel_bias", GetMtdFloat(mtd, "g_FresnelBias", 0.1f));
 				mat.SetShaderParameter("fresnel_scale", GetMtdFloat(mtd, "g_FresnelScale", 1.0f));
 				mat.SetShaderParameter("fresnel_color", GetMtdColor3(mtd, "g_FresnelColor", Colors.White));
-				mat.SetShaderParameter("water_fade_begin", GetMtdFloat(mtd, "g_WaterFadeBegin", 0.5f));
+				mat.SetShaderParameter("water_fade_begin", GetMtdFloat(mtd, "g_WaterFadeBegin", 0.7f));
 				// A Z bias on the summed wave normal, not an xy scale.
 				mat.SetShaderParameter("bump_smoose", GetMtdFloat(mtd, "g_BumpMapSmoose", 1.0f));
 				// The sun-glint weight c39 = g_SpecularMapColor * g_SpecularMapColorPower exactly.
@@ -903,8 +906,8 @@ public partial class FlverModelBuilder : RefCounted
 	}
 
 	// Pfim decodes only face 0 of a cube DDS, so each face (an exact sixth of the payload) is
-	// re-wrapped as its own 2D DDS. Uncompressed ARGB faces bypass Pfim: it misreads them as Rgb24
-	// and rotates the channels into a rainbow (m02, m04, m06, m08, m99).
+	// re-wrapped as its own 2D DDS. Uncompressed ARGB faces (TPF format 10: m02, m04, m06, m08,
+	// m99) bypass Pfim, which misreads them as Rgb24 and rotates the channels into a rainbow.
 	private Cubemap DecodeCubemap(TPF.Texture texture)
 	{
 		var dds = Headerizer.Headerize(texture, out _);
@@ -925,7 +928,7 @@ public partial class FlverModelBuilder : RefCounted
 			Buffer.BlockCopy(dds, headerLen + f * stride, faceDds, headerLen, stride);
 			faces.Add(IsBlockCompressed(dds)
 				? DecodeFaceImage(faceDds, texture.Name)
-				: DecodeUncompressedFace(dds, headerLen + f * stride, DdsWidth(dds), DdsHeight(dds), texture.Name));
+				: DecodeArgbImage(dds.AsSpan(headerLen + f * stride), DdsWidth(dds), DdsHeight(dds), texture.Name));
 		}
 
 		var cubemap = new Cubemap();
@@ -935,7 +938,7 @@ public partial class FlverModelBuilder : RefCounted
 
 	// A DX10 extended header adds 20 bytes after the standard 128, flagged by a "DX10" fourCC in
 	// the pixel-format block at offset 84.
-	private static int DdsHeaderLength(byte[] dds) =>
+	internal static int DdsHeaderLength(byte[] dds) =>
 		dds.Length > 88 && dds[84] == (byte)'D' && dds[85] == (byte)'X' && dds[86] == (byte)'1' && dds[87] == (byte)'0'
 			? 148 : 128;
 
@@ -943,26 +946,23 @@ public partial class FlverModelBuilder : RefCounted
 
 	// DDS header: dwHeight at 12, dwWidth at 16; the pixel-format block's dwFlags at 80, whose
 	// DDPF_FOURCC bit (0x4) is what distinguishes a block-compressed payload from a raw one.
-	private static int DdsHeight(byte[] dds) => (int)BitConverter.ToUInt32(dds, 12);
-	private static int DdsWidth(byte[] dds) => (int)BitConverter.ToUInt32(dds, 16);
+	internal static int DdsHeight(byte[] dds) => (int)BitConverter.ToUInt32(dds, 12);
+	internal static int DdsWidth(byte[] dds) => (int)BitConverter.ToUInt32(dds, 16);
 	private static bool IsBlockCompressed(byte[] dds) => (BitConverter.ToUInt32(dds, 80) & 0x4u) != 0;
 
-	// Big-endian ARGB8888 (the first byte is a constant 0xFF). Base level only; Godot regenerates
-	// the mips.
-	private static Image DecodeUncompressedFace(byte[] dds, int offset, int width, int height, string name)
+	// TPF format 10: ARGB8888. The fork's Headerizer already deswizzles it (the TPF bytes are in
+	// RSX swizzled order), but its DDS header declares 24-bit RGB, so Pfim misreads the 32-bit
+	// payload. Read it here as A,R,G,B, row-major. Base level only; Godot regenerates the mips.
+	internal static Image DecodeArgbImage(ReadOnlySpan<byte> src, int width, int height, string name)
 	{
-		int pixels = width * height;
-		if (width <= 0 || height <= 0 || offset + pixels * 4 > dds.Length)
-			throw new NotSupportedException($"{name}: uncompressed face {width}x{height} doesn't fit the payload");
+		if (width <= 0 || height <= 0 || width > 4096 || height > 4096 || (long)width * height * 4 > src.Length)
+			throw new NotSupportedException($"{name}: ARGB {width}x{height} doesn't fit the payload");
 
-		var rgba = new byte[pixels * 4];
-		for (int i = 0; i < pixels; i++)
+		var rgba = new byte[width * height * 4];
+		for (int i = 0; i < width * height; i++)
 		{
-			int src = offset + i * 4;
-			rgba[i * 4 + 0] = dds[src + 1];
-			rgba[i * 4 + 1] = dds[src + 2];
-			rgba[i * 4 + 2] = dds[src + 3];
-			rgba[i * 4 + 3] = dds[src + 0];
+			rgba[i * 4] = src[i * 4 + 1]; rgba[i * 4 + 1] = src[i * 4 + 2];
+			rgba[i * 4 + 2] = src[i * 4 + 3]; rgba[i * 4 + 3] = src[i * 4];
 		}
 
 		var image = Image.CreateFromData(width, height, false, Image.Format.Rgba8, rgba);
@@ -1002,6 +1002,13 @@ public partial class FlverModelBuilder : RefCounted
 	private ImageTexture DecodeTexture(TPF.Texture texture)
 	{
 		var ddsBytes = Headerizer.Headerize(texture, out _);
+		if (texture.Format == 10)
+		{
+			var argb = DecodeArgbImage(ddsBytes.AsSpan(DdsHeaderLength(ddsBytes)), DdsWidth(ddsBytes), DdsHeight(ddsBytes), texture.Name);
+			_decodedBytes += argb.GetWidth() * argb.GetHeight() * 4 * 4 / 3;
+			MaybeEvictDecodedTextures();
+			return ImageTexture.CreateFromImage(argb);
+		}
 		using var ddsStream = new System.IO.MemoryStream(ddsBytes);
 		using var pfImage = Pfim.Pfimage.FromStream(ddsStream);
 		if (pfImage.Format != Pfim.ImageFormat.Rgba32)

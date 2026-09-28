@@ -9,8 +9,9 @@ const int LIGHTING_HEM_ENV = 0;
 const int LIGHTING_HEM_DIR3 = 1;
 uniform int lighting_model = 0;
 
-// LIGHT_BANK's three directional lights (world-space travel directions from degRotX/Y, colours
-// premultiplied by colA) and its specular colour. Zero by default: an unbound material is unlit.
+// LIGHT_BANK's three directional lights (world-space toward-light directions from degRotX/Y,
+// colours premultiplied by colA) and its specular colour. Zero by default: an unbound material is
+// unlit.
 uniform vec3 dir_light_colors[3];
 uniform vec3 dir_light_directions[3];
 uniform vec3 spec_light_color = vec3(0.0);
@@ -62,6 +63,7 @@ uniform float shadow_density = 0.9;          // densityRatio / 100
 uniform vec3 shadow_tint = vec3(0.0);        // colR/G/B / 255
 uniform float shadow_fade_begin = 1000.0;    // fadeBeginDist
 uniform float shadow_fade_range = 1.0;       // fadeDist
+uniform float shadow_pow_mul = 1.0;          // the material's g_ShadowPowMul
 
 varying vec3 world_normal;
 varying vec3 world_tangent;
@@ -81,14 +83,15 @@ vec3 decode_normal_map(vec2 sampled_xy) {
 
 // Per-pixel normal through the TBN, or the vertex normal without a bump map. Flipped on back
 // faces so double-sided meshes shade toward the camera; FRONT_FACING is passed in because a
-// nested helper cannot read it.
+// nested helper cannot read it. DeS bump X runs along +U and Y along +V (the FLVER tangent);
+// Godot's generated BINORMAL points along -V, so Y is negated.
 vec3 hemisphere_pixel_normal(vec3 tangent_space_normal, bool front_facing) {
 	vec3 n;
 	if (!use_normal_map) {
 		n = normalize(world_normal);
 	} else {
 		n = normalize(tangent_space_normal.x * world_tangent
-			+ tangent_space_normal.y * world_binormal
+			- tangent_space_normal.y * world_binormal
 			+ tangent_space_normal.z * world_normal);
 	}
 	return front_facing ? n : -n;
@@ -134,10 +137,11 @@ vec3 point_lights_diffuse(vec3 world_pos, vec3 normal) {
 	return total;
 }
 
-// The engine's per-channel shadow term 1 - (density - tint) * fade * inShadow. vec3(1.0) wherever
-// there is no shadow information (disabled, faded, outside the atlas). The game does one
-// hardware 2x2 compare; the packed RGBA8 depth here cannot be hardware-filtered, so a rotated
-// 12-tap Poisson disk (rotation hashed from world_pos, stable on a static scene) stands in.
+// The engine's per-channel shadow term 1 - (density - tint) * g_ShadowPowMul * fade * inShadow.
+// vec3(1.0) wherever there is no shadow information (disabled, faded, outside the atlas). The
+// game does one hardware 2x2 compare; the packed RGBA8 depth here cannot be hardware-filtered,
+// so a rotated 12-tap Poisson disk (rotation hashed from world_pos, stable on a static scene)
+// stands in.
 const vec2 SHADOW_POISSON_12[12] = {
 	vec2(-0.326, -0.406), vec2(-0.840, -0.074), vec2(-0.696, 0.457), vec2(-0.203, 0.621),
 	vec2(0.962, -0.195), vec2(0.473, -0.480), vec2(0.519, 0.767), vec2(0.185, -0.893),
@@ -174,18 +178,21 @@ vec3 sun_shadow(vec3 world_pos, float view_distance) {
 		lit += (occluder_d <= 0.0 || receiver_d - shadow_bias <= occluder_d) ? 1.0 : 0.0;
 	}
 	float in_shadow = (1.0 - lit / 12.0) * fade * shadow_strength;
-	return vec3(1.0) - max(vec3(shadow_density) - shadow_tint, vec3(0.0)) * in_shadow;
+	return vec3(1.0) - max(vec3(shadow_density) - shadow_tint, vec3(0.0)) * shadow_pow_mul * in_shadow;
 }
+
+// Cube faces are in FLVER space, the X mirror of Godot's: lookups negate X back.
+const vec3 CUBE_MIRROR = vec3(-1.0, 1.0, 1.0);
 
 // EnvDif by the normal, gated by min(shadow, lightmap).
 vec3 env_diffuse(vec3 normal, vec3 gate) {
-	return texture(env_dif_cube, normal).rgb * env_color * env_intensity * gate;
+	return texture(env_dif_cube, normal * CUBE_MIRROR).rgb * env_color * env_intensity * gate;
 }
 
 // EnvSpc by the reflection vector, weighted by the RGB specular sample, `tint` (the vertex colour)
 // and specular_tint, gated like env_diffuse.
 vec3 env_specular(vec3 normal, vec3 view_dir, vec3 gate, vec3 specular_sample, vec3 tint) {
 	vec3 reflected = reflect(-view_dir, normal);
-	return texture(env_spc_cube, reflected).rgb * env_spc_color * env_spc_intensity
+	return texture(env_spc_cube, reflected * CUBE_MIRROR).rgb * env_spc_color * env_spc_intensity
 		* gate * specular_sample * tint * specular_tint;
 }

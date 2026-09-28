@@ -18,6 +18,8 @@ public partial class ShadowRenderer : Node
 
 	private static readonly Shader DepthShader =
 		GD.Load<Shader>("res://addons/archstone/shaders/shadow_depth.gdshader");
+	private static readonly Shader AlphaDepthShader =
+		GD.Load<Shader>("res://addons/archstone/shaders/shadow_depth_alpha.gdshader");
 
 	private SubViewport _viewport;
 	private Camera3D _camera;
@@ -80,14 +82,18 @@ public partial class ShadowRenderer : Node
 
 		var depthMaterial = new ShaderMaterial { Shader = DepthShader };
 		depthMaterial.SetShaderParameter("light_far", far);
+		var alphaDepthMaterials = new System.Collections.Generic.Dictionary<(Texture2D, float), ShaderMaterial>();
 
 		foreach (var caster in casters)
 		{
 			if (caster.Mesh == null)
 				continue;
-			var clone = new MeshInstance3D { Mesh = caster.Mesh, MaterialOverride = depthMaterial };
+			var clone = new MeshInstance3D { Mesh = caster.Mesh };
 			_viewport.AddChild(clone);
 			clone.Transform = WorldTransform(caster); // both hierarchies are flat, so world == local here
+			for (int surface = 0; surface < caster.Mesh.GetSurfaceCount(); surface++)
+				clone.SetSurfaceOverrideMaterial(surface,
+					CasterMaterial(caster, surface, depthMaterial, alphaDepthMaterials, far));
 		}
 
 		BindReceivers(casters, clip, view, far, shadowBias, density, tint, fadeBegin, fadeDist);
@@ -132,6 +138,26 @@ public partial class ShadowRenderer : Node
 				material.SetShaderParameter("shadow_fade_range", Mathf.Max(fadeRange, 0.01f));
 			}
 		}
+	}
+
+	// The alpha-tested depth material for a surface whose lit material alpha-tests, shared per
+	// diffuse texture; the opaque one otherwise.
+	private static ShaderMaterial CasterMaterial(MeshInstance3D caster, int surface, ShaderMaterial opaque,
+		System.Collections.Generic.Dictionary<(Texture2D, float), ShaderMaterial> alphaMaterials, float far)
+	{
+		var source = (caster.GetSurfaceOverrideMaterial(surface) ?? caster.Mesh.SurfaceGetMaterial(surface)) as ShaderMaterial;
+		float threshold = source?.GetShaderParameter("alpha_scissor_threshold").AsSingle() ?? 0.0f;
+		if (threshold <= 0.0f || source.GetShaderParameter("diffuse").As<Texture2D>() is not Texture2D diffuse)
+			return opaque;
+		if (!alphaMaterials.TryGetValue((diffuse, threshold), out var material))
+		{
+			material = new ShaderMaterial { Shader = AlphaDepthShader };
+			material.SetShaderParameter("light_far", far);
+			material.SetShaderParameter("diffuse", diffuse);
+			material.SetShaderParameter("alpha_scissor_threshold", threshold);
+			alphaMaterials[(diffuse, threshold)] = material;
+		}
+		return material;
 	}
 
 	private static bool MergedCasterBounds(Godot.Collections.Array<MeshInstance3D> casters, out Aabb bounds)
